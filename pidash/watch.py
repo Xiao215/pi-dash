@@ -126,6 +126,19 @@ def _match_service(entry):
     return None
 
 
+_LOG_PREFIX = re.compile(r"^(?:\[?\d{4}-\d\d-\d\d[T ][\d:]{8}(?:[.,]\d+)?(?:Z|[+-]\d\d:?\d\d)?\]?[\s:-]*)?"
+                         r"(?:\[?(?:ERROR|CRITICAL|FATAL)\]?(?:[\s:-]+|$))?")
+
+
+def _error_summary(lines, extra=0):
+    """The error itself, minus the timestamp and level it's logged with: what tells one alert from the next."""
+    first = _LOG_PREFIX.sub("", lines[0]).strip() if lines else ""
+    summary = first[:200] + ("…" if len(first) > 200 else "") or "New error lines."
+    if extra:
+        summary += f"\n+{extra} more since the last alert."
+    return summary
+
+
 def _journal():
     pending: dict[str, dict] = {}  # service -> {"lines": [...], "until": t}
     lock = threading.Lock()
@@ -139,8 +152,8 @@ def _journal():
                 batches = [(k, pending.pop(k)) for k in ready]
             for name, batch in batches:
                 extra = _suppressed.pop(name, 0)
-                note = f" (+{extra} more since the last alert)" if extra else ""
-                alert("warn", f"Errors in {name}'s log", f"New error lines{note}.", name, log_lines=batch["lines"][-25:])
+                alert("warn", f"Errors in {name}'s log", _error_summary(batch["lines"], extra), name,
+                      log_lines=batch["lines"][-25:])
 
     threading.Thread(target=flush, name="error-flush", daemon=True).start()
 

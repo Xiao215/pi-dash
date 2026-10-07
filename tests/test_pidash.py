@@ -323,6 +323,14 @@ raspi-firmware/stable 1:1.20250915-1 arm64 [upgradable from: 1:1.20250430-1]
         self.assertEqual(watch._ago(7300), "2 h 1 min")
         self.assertEqual(watch._ago(3 * 86400), "3 days")
 
+    def test_error_summary(self):
+        self.assertEqual(watch._error_summary(["2026-10-07 12:31:59,726 ERROR xiap.llm: gemini failed after 90.0s: TimeoutError"]),
+                         "xiap.llm: gemini failed after 90.0s: TimeoutError")
+        self.assertEqual(watch._error_summary(["[2026-10-07T12:31:59.726Z] [ERROR] boom", "  at x"], extra=2),
+                         "boom\n+2 more since the last alert.")
+        self.assertEqual(watch._error_summary(["Traceback (most recent call last):"]), "Traceback (most recent call last):")
+        self.assertEqual(watch._error_summary(["ERROR"]), "New error lines.")
+
     def test_downtime_waits_for_clock_sync(self):
         booted = time.time() - 100
         with unittest.mock.patch.object(system, "uptime", return_value=100), \

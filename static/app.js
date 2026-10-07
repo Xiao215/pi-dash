@@ -715,6 +715,9 @@ document.addEventListener("click", (ev) => {
   const li = btn.parentElement;
   li.classList.toggle("open");
   btn.setAttribute("aria-expanded", li.classList.contains("open"));
+  // The last lines are the ones that explain a crash, so open at the bottom.
+  const pre = $(":scope > .ev-log pre", li);
+  if (pre && li.classList.contains("open")) pre.scrollTop = pre.scrollHeight;
   li.classList.contains("open") ? openEvents.add(li.dataset.key) : openEvents.delete(li.dataset.key);
 });
 
