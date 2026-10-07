@@ -201,8 +201,8 @@ main > section { min-width: 0; }
 .state-text.down, .state-text.missing { color: var(--down); }
 .state-text.stopped { color: var(--muted); }
 .svc-desc { color: var(--muted); font-size: 14px; margin-top: 4px; }
-.svc-desc a { color: var(--info); text-decoration: none; display: inline-flex; align-items: center; gap: 3px; }
-.svc-desc a .i { width: 13px; height: 13px; }
+a.btn { text-decoration: none; color: inherit; }
+.btn.open { color: var(--info); }
 .problem { display: flex; gap: 8px; align-items: flex-start; margin-top: 10px; padding: 8px 12px; border-radius: 10px; font-size: 13.5px;
   background: color-mix(in srgb, var(--warn) 10%, transparent); color: color-mix(in srgb, var(--warn) 75%, var(--text)); animation: appear .3s var(--ease); }
 .problem .i { margin-top: 2px; color: var(--warn); }

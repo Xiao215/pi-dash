@@ -442,7 +442,10 @@ function actionButtons(s) {
     return `<button class="btn ${extra}" data-svc="${esc(s.name)}" data-action="${action}" ${working ? "disabled" : ""}>${spinning ? '<span class="spin"></span>' : icon(ic)}<span>${label}</span>${count}</button>`;
   };
   const behind = s.source?.behind || 0;
+  let host = "";
+  try { host = s.url ? new URL(s.url).host : ""; } catch { /* not a full URL: the button still works */ }
   return [
+    s.url ? `<a class="btn open" href="${esc(s.url)}" target="_blank" rel="noopener" title="${esc(host || s.url)}">${icon("external")}<span>Open</span></a>` : "",
     b("logs", "Logs", "logs", "quiet"),
     running ? b("restart", "Restart", "restart") : "",
     running ? b("stop", "Stop", "stop", "danger-text") : b("start", "Start", "play"),
@@ -473,7 +476,7 @@ function renderServices(data) {
     const st = $(".state-text", el);
     cls(st, `state-text ${s.state}`);
     put(st, STATE_LABEL[s.state] || esc(s.state));
-    put($(".svc-desc", el), esc(s.description) + (s.url ? ` <a href="${esc(s.url)}" target="_blank" rel="noopener">Open${icon("external")}</a>` : ""));
+    put($(".svc-desc", el), esc(s.description));
 
     const prob = $(".problem", el);
     prob.hidden = !s.problem;
@@ -1042,7 +1045,7 @@ function renderPage(data) {
   put($("#sp-kind"), KIND_LABEL[s.kind] || esc(s.kind));
   cls($("#sp-state"), `state-text ${s.state}`);
   put($("#sp-state"), STATE_LABEL[s.state] || esc(s.state));
-  put($("#sp-desc"), esc(s.description) + (s.url ? ` <a href="${esc(s.url)}" target="_blank" rel="noopener">Open${icon("external")}</a>` : ""));
+  put($("#sp-desc"), esc(s.description));
   const prob = $("#sp-problem");
   prob.hidden = !s.problem;
   put(prob, s.problem ? `${icon("alert")}<span>${esc(s.problem)}</span>` : "");
