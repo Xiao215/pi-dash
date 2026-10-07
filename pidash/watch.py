@@ -65,6 +65,8 @@ def _docker_events():
             label = svc.name if svc else name
             if not svc and not _long_running(name):
                 continue  # one-off/test containers (no restart policy) aren't services
+            if svc and services.running_job(svc):
+                continue  # replaced on purpose by an update/restart, not a crash
             if action == "die":
                 code = attrs.get("exitCode", "0")
                 if code in ("0", "143") or label in store.load_state().get("stopped", []):
