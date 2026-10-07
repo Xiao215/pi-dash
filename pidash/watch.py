@@ -501,6 +501,24 @@ def _boot_reason():
     return "unexpected: power was cut or it crashed", last_t
 
 
+def _clock_synced():
+    code, out = services.run(["timedatectl", "show", "-p", "NTPSynchronized", "--value"])
+    return code != 0 or out.strip() == "yes"  # no timedatectl: nothing to wait for, trust the clock
+
+
+def _downtime(last_t):
+    """Seconds between the last log line of the previous boot and this boot, or None if unknown.
+    A Pi has no battery clock: it boots with the last time it saved, which runs behind until NTP
+    syncs, so the boot looks earlier than it was (even before last_t). Wait for the sync; with no
+    network the alert can't go out anyway."""
+    for _ in range(30):
+        if _clock_synced():
+            down = time.time() - system.uptime() - last_t
+            return down if down >= 0 else None
+        time.sleep(10)
+    return None
+
+
 def _announce_boot():
     state = store.load_state()
     current = system.boot_id()
@@ -518,7 +536,8 @@ def _announce_boot():
         alert("boot", "pi-dash is watching this Pi", f"You'll hear from me only when something needs you{morning}.\n\n{summary}")
     else:
         reason, last_t = _boot_reason()
-        off = f"\nWas down for about {_ago(time.time() - system.uptime() - last_t)}." if last_t else ""
+        down = _downtime(last_t) if last_t else None
+        off = f"\nWas down for about {_ago(down)}." if down is not None else ""
         level = "error" if reason.startswith("unexpected") else "boot"
         alert(level, "Pi restarted", f"Reason: {reason}.{off}\n\n{summary}")
     store.update_state(boot_id=current, planned=None)  # only once announced, so a pi-dash restart mid-wait still announces

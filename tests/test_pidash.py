@@ -323,6 +323,26 @@ raspi-firmware/stable 1:1.20250915-1 arm64 [upgradable from: 1:1.20250430-1]
         self.assertEqual(watch._ago(7300), "2 h 1 min")
         self.assertEqual(watch._ago(3 * 86400), "3 days")
 
+    def test_downtime_waits_for_clock_sync(self):
+        booted = time.time() - 100
+        with unittest.mock.patch.object(system, "uptime", return_value=100), \
+                unittest.mock.patch.object(watch.time, "sleep") as sleep, \
+                unittest.mock.patch.object(services, "run", side_effect=[(0, "no\n"), (0, "no\n"), (0, "yes\n")]):
+            self.assertAlmostEqual(watch._downtime(booted - 34), 34, delta=2)
+        self.assertEqual(sleep.call_count, 2)
+        # clock never synced: don't guess
+        with unittest.mock.patch.object(watch.time, "sleep"), \
+                unittest.mock.patch.object(services, "run", return_value=(0, "no\n")):
+            self.assertIsNone(watch._downtime(booted - 34))
+        # synced but the last log line is after the boot (clock was set back): don't report a negative time
+        with unittest.mock.patch.object(system, "uptime", return_value=100), \
+                unittest.mock.patch.object(services, "run", return_value=(0, "yes\n")):
+            self.assertIsNone(watch._downtime(booted + 32))
+        # no timedatectl (not systemd): trust the clock
+        with unittest.mock.patch.object(system, "uptime", return_value=100), \
+                unittest.mock.patch.object(services, "run", return_value=(1, "No such file or directory")):
+            self.assertAlmostEqual(watch._downtime(booted - 34), 34, delta=2)
+
 
 class ScheduledJobs(unittest.TestCase):
     def setUp(self):
