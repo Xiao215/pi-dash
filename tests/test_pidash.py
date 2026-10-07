@@ -218,11 +218,26 @@ class PruneImages(unittest.TestCase):
         with unittest.mock.patch.object(services, "run", side_effect=self.fake):
             self.assertEqual(services.prune_images(job), "1.6 GB")  # images + week-old build cache
         self.assertEqual(job["lines"], ["$ docker image prune -f", "Total reclaimed space: 1.214GB",
-                                        "$ docker builder prune -f --filter until=168h", "Total:\t386.5MB"])
+                                        "$ docker builder prune -f --all --max-used-space 1024mb", "Total:\t386.5MB"])
         with unittest.mock.patch.object(services, "run", return_value=(0, "Total reclaimed space: 0B\nTotal:\t0B\n")):
             self.assertEqual(services.prune_images(), "")
         with unittest.mock.patch.object(services, "run", return_value=(1, "Cannot connect to the Docker daemon")):
             self.assertEqual(services.prune_images(), "")
+
+    def test_build_cache_size_is_configurable(self):
+        with unittest.mock.patch.object(config, "BUILD_CACHE_GB", 0):
+            self.assertEqual(services.prune_steps()[1][0], ["docker", "builder", "prune", "-f", "--all"])
+        with unittest.mock.patch.object(config, "BUILD_CACHE_GB", 2.5):
+            self.assertEqual(services.prune_steps()[1][0][-2:], ["--max-used-space", "2560mb"])
+
+    def test_daily_cleanup_runs_once_a_day(self):
+        store.STATE.unlink(missing_ok=True)
+        with unittest.mock.patch.object(watch.shutil, "which", return_value="/usr/bin/docker"), \
+                unittest.mock.patch.object(services, "run", side_effect=self.fake) as run:
+            watch._daily_docker_cleanup()
+            watch._daily_docker_cleanup()
+        self.assertEqual(run.call_count, 2)  # image + build cache, once
+        self.assertEqual(store.events()[0]["title"], "Cleaned up Docker")
 
     def test_waits_while_another_update_runs(self):
         services.jobs["1"] = {"done": False, "action": "update"}

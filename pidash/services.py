@@ -281,20 +281,25 @@ def recent_logs(svc, lines=20) -> list[str]:
 
 
 SIZE_UNITS = {"B": 1, "kB": 1e3, "KB": 1e3, "MB": 1e6, "GB": 1e9, "TB": 1e12}
-PRUNE_STEPS = [  # (command, the line that says how much it freed)
-    (["docker", "image", "prune", "-f"], r"Total reclaimed space:\s*([\d.]+)\s*([kKMGT]?B)"),
-    # build cache that `up --build` piles up; a week's worth stays, so rebuilds stay quick
-    (["docker", "builder", "prune", "-f", "--filter", "until=168h"], r"Total:\s*([\d.]+)\s*([kKMGT]?B)"),
-]
+def prune_steps():
+    """(command, the line that says how much it freed) for each cleanup."""
+    cache = ["docker", "builder", "prune", "-f", "--all"]
+    if config.BUILD_CACHE_GB > 0:  # keep the most recently used layers, so rebuilds stay quick
+        cache += ["--max-used-space", f"{int(config.BUILD_CACHE_GB * 1024)}mb"]
+    return [
+        (["docker", "image", "prune", "-f"], r"Total reclaimed space:\s*([\d.]+)\s*([kKMGT]?B)"),
+        (cache, r"Total:\s*([\d.]+)\s*([kKMGT]?B)"),
+    ]
 
 
 def prune_images(job=None) -> str:
-    """Remove images that no tag points to and no container uses, and build cache older than a week:
-    what `compose pull` and `up --build` leave behind. Returns the space freed ("1.2 GB"), or ""."""
+    """Remove images that no tag points to and no container uses, and build cache beyond BUILD_CACHE_GB
+    (least recently used first): what `compose pull` and `up --build` leave behind.
+    Returns the space freed ("1.2 GB"), or ""."""
     if not config.PRUNE_IMAGES or any(not j["done"] and j["action"] == "update" and j is not job for j in jobs.values()):
         return ""  # another update may be building right now; the next update cleans up
     freed = 0.0
-    for cmd, total_re in PRUNE_STEPS:
+    for cmd, total_re in prune_steps():
         code, out = run(cmd, timeout=300)
         m = re.search(total_re, out)
         if job is not None:

@@ -19,10 +19,11 @@ password_hash = ""
 registry = "~/services/services.json"
 # Prepended to PATH for update steps and checks, e.g. where `claude` or a Node version manager lives.
 extra_path = ["~/.local/bin"]
-# After a Docker service updates and comes back healthy, remove what the update left behind: untagged
-# images no container uses (`docker image prune -f`) and build cache older than a week
-# (`docker builder prune -f --filter until=168h`). Otherwise every update keeps the old image on the SD card.
+# After a Docker service updates and comes back healthy, and once a day, remove what builds and pulls
+# leave behind: untagged images no container uses (`docker image prune -f`) and build cache beyond
+# build_cache_gb, least recently used first. Otherwise every update keeps the old image on the SD card.
 prune_images = true
+build_cache_gb = 1       # enough for quick rebuilds; 0 keeps no build cache
 
 [discord]
 # Channel webhook (Server Settings → Integrations → Webhooks). Empty: alerts stay on the dashboard.

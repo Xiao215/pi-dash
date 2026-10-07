@@ -35,6 +35,7 @@ PASSWORD_HASH = _get("server", "password_hash", "")  # set with: python3 -m pida
 REGISTRY = Path(_get("services", "registry", "~/services/services.json")).expanduser()
 EXTRA_PATH = [str(Path(p).expanduser()) for p in _get("services", "extra_path", ["~/.local/bin"])]
 PRUNE_IMAGES = bool(_get("services", "prune_images", True))  # remove the old images a Docker update leaves behind
+BUILD_CACHE_GB = float(_get("services", "build_cache_gb", 1))  # Docker build cache to keep (newest first); 0 keeps none
 
 WEBHOOK_URL = _get("discord", "webhook_url", "")
 PING_USER = str(_get("discord", "ping_user_id", ""))

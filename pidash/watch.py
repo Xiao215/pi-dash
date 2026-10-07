@@ -422,6 +422,19 @@ def _health_once():
     _check_updates()
     _check_memory_growth()
     system.refresh_updates()
+    _daily_docker_cleanup()
+
+
+def _daily_docker_cleanup():
+    """Updates clean up after themselves; this also catches builds and pulls done by hand."""
+    if not shutil.which("docker", path=services.ENV["PATH"]):
+        return
+    if time.time() - store.load_state().get("docker_cleaned", 0) < 86400:
+        return
+    store.update_state(docker_cleaned=time.time())
+    freed = services.prune_images()
+    if freed:
+        alert("info", "Cleaned up Docker", f"Freed {freed} of old images and build cache.", discord=False)
 
 
 def _check_updates():
