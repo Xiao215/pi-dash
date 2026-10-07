@@ -1,0 +1,40 @@
+# pi-dash settings. install.sh copies this to /etc/pi-dash/config.toml (mode 600, owned by the
+# user pi-dash runs as), because it holds your Discord webhook. Restart pi-dash after editing:
+#   sudo systemctl restart pi-dash
+# Every setting is optional; the values shown are the defaults.
+
+[server]
+host = "0.0.0.0"
+port = 9000
+# Extra hostnames the dashboard may be opened under. localhost, this machine's hostname,
+# <hostname>.local, *.ts.net (Tailscale) and plain IP addresses always work.
+allowed_hosts = []
+# Optional password for the dashboard, stored as a scrypt hash. Set or change it with
+#   python3 -m pidash.passwd        (remove it with --remove)
+# Requests from the server itself (curl on localhost) don't need it.
+password_hash = ""
+
+[services]
+# The list of services to watch (see examples/services.example.json).
+registry = "~/services/services.json"
+# Prepended to PATH for update steps and checks, e.g. where `claude` or a Node version manager lives.
+extra_path = ["~/.local/bin"]
+
+[discord]
+# Channel webhook (Server Settings → Integrations → Webhooks). Empty: alerts stay on the dashboard.
+webhook_url = ""
+# Your Discord user ID (Settings → Advanced → Developer Mode, then right-click your name → Copy User ID).
+# Red alerts @mention you. Empty: no pings.
+ping_user_id = ""
+
+[schedule]
+digest_hour = 9          # morning summary, local time; -1 turns it off
+update_every = 300       # seconds between checks for new commits / images
+health_every = 600       # seconds between checks of disk, temperature, power, failed units
+error_cooldown = 600     # at most one "errors in the log" alert per service in this many seconds
+keep_days = 7            # history kept for the activity feed and uptime bars
+
+[thresholds]
+disk_percent = 80        # warn at this, error at +10
+temperature_c = 75       # warn at this, error at +5
+memory_free_percent = 10

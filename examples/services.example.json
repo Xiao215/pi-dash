@@ -1,0 +1,38 @@
+{
+  "services": [
+    {
+      "name": "my-bot",
+      "kind": "compose",
+      "description": "Built on the Pi from a git checkout in ./repo",
+      "dir": "~/services/my-bot",
+      "repo": "repo",
+      "container": "my-bot",
+      "health": "http://127.0.0.1:8080/",
+      "update": ["git -C repo pull --ff-only", "docker compose up -d --build"]
+    },
+    {
+      "name": "my-app",
+      "kind": "compose",
+      "description": "Runs a published image; auto-updates when a new one appears",
+      "dir": "~/services/my-app",
+      "container": "my-app",
+      "health": "http://127.0.0.1:3000/api/health",
+      "url": "https://example.com",
+      "update": ["docker compose pull", "docker compose up -d"]
+    },
+    {
+      "name": "my-api",
+      "kind": "systemd-user",
+      "description": "A systemd user service; the folder is the git checkout",
+      "dir": "~/services/my-api",
+      "unit": "my-api.service",
+      "health": "http://127.0.0.1:8787/health",
+      "check": {
+        "command": "test -f ~/.config/my-api/token",
+        "problem": "my-api has no token yet. Run my-api login on the Pi.",
+        "every": 300
+      },
+      "update": ["git pull --ff-only", "systemctl --user restart my-api"]
+    }
+  ]
+}

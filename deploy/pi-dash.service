@@ -1,0 +1,19 @@
+# Template: install.sh fills in the @...@ values and installs it as /etc/systemd/system/pi-dash.service.
+[Unit]
+Description=pi-dash: service dashboard and Discord alerts
+After=network-online.target docker.service user@@UID@.service
+Wants=network-online.target
+
+[Service]
+User=@USER@
+Group=@USER@
+SupplementaryGroups=@GROUPS@
+WorkingDirectory=@DIR@
+ExecStart=/usr/bin/python3 -m pidash
+Environment=PYTHONUNBUFFERED=1 PIDASH_CONFIG=/etc/pi-dash/config.toml
+StateDirectory=pi-dash
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

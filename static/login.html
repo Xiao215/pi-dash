@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f6f6f8" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0f0f12" media="(prefers-color-scheme: dark)">
+  <title>Sign in · pi-dash</title>
+  <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body class="login-page">
+  <form class="login card appear" id="login">
+    <img class="logo" src="/static/icon.svg" alt="" width="44" height="44">
+    <h1>pi-dash</h1>
+    <p class="muted small">Enter the dashboard password.</p>
+    <label class="field">
+      <span class="sr-only">Password</span>
+      <input id="password" type="password" autocomplete="current-password" placeholder="Password" required autofocus>
+    </label>
+    <p class="login-error" id="error" role="alert" hidden></p>
+    <button class="btn primary wide" id="submit" type="submit">Sign in</button>
+  </form>
+  <script>
+    const form = document.getElementById("login");
+    const error = document.getElementById("error");
+    const submit = document.getElementById("submit");
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      submit.disabled = true;
+      error.hidden = true;
+      try {
+        const res = await fetch("/api/login", {
+          method: "POST",
+          headers: { "X-Pi-Dash": "1", "Content-Type": "application/json" },
+          body: JSON.stringify({ password: document.getElementById("password").value }),
+        });
+        if (res.ok) return location.replace("/");
+        const body = await res.json().catch(() => ({}));
+        error.textContent = body.error || "Couldn't sign in.";
+      } catch {
+        error.textContent = "Can't reach the server.";
+      }
+      error.hidden = false;
+      form.classList.remove("shake");
+      void form.offsetWidth;
+      form.classList.add("shake");
+      submit.disabled = false;
+      document.getElementById("password").select();
+    });
+  </script>
+</body>
+</html>
