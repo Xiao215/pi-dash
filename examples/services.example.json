@@ -34,5 +34,19 @@
       },
       "update": ["git pull --ff-only", "systemctl --user restart my-api"]
     }
+  ],
+  "jobs": [
+    {
+      "name": "backup",
+      "description": "A systemd timer: pi-dash reads its runs from systemd",
+      "timer": "backup.timer",
+      "every": "1d"
+    },
+    {
+      "name": "photo-sync",
+      "description": "A cron job that reports in: ... ; curl -fsS -d \"$out\" localhost:9000/api/ping/photo-sync/$?",
+      "every": "6h",
+      "grace": "30m"
+    }
   ]
 }

@@ -34,9 +34,14 @@ PASSWORD_HASH = _get("server", "password_hash", "")  # set with: python3 -m pida
 
 REGISTRY = Path(_get("services", "registry", "~/services/services.json")).expanduser()
 EXTRA_PATH = [str(Path(p).expanduser()) for p in _get("services", "extra_path", ["~/.local/bin"])]
+PRUNE_IMAGES = bool(_get("services", "prune_images", True))  # remove the old images a Docker update leaves behind
 
 WEBHOOK_URL = _get("discord", "webhook_url", "")
 PING_USER = str(_get("discord", "ping_user_id", ""))
+
+# An outside service (e.g. healthchecks.io) that pages you when these pings stop, i.e. when the Pi is off or offline.
+HEARTBEAT_URL = _get("heartbeat", "url", "")
+HEARTBEAT_EVERY = int(_get("heartbeat", "every", 120))
 
 DIGEST_HOUR = int(_get("schedule", "digest_hour", 9))       # -1 turns the morning summary off
 UPDATE_EVERY = int(_get("schedule", "update_every", 300))   # new commits / images
@@ -76,10 +81,43 @@ class Service:
         return self.path / self.repo if self.repo else self.path
 
 
-def load_services() -> list[Service]:
+def seconds(value) -> int:
+    """300, "300", "45s", "30m", "6h", "1d" -> seconds."""
+    text = str(value).strip().lower()
+    unit = {"s": 1, "m": 60, "h": 3600, "d": 86400}.get(text[-1:])
+    return int(float(text[:-1]) * unit) if unit else int(float(text))
+
+
+@dataclass
+class Job:
+    """Something that runs on a schedule: a systemd timer, or anything that pings /api/ping/<name> when done."""
+    name: str
+    description: str = ""
+    timer: str = ""                 # systemd timer, e.g. "backup.timer"
+    user: bool = False              # a `systemctl --user` timer
+    service: str = ""               # the unit the timer starts (default: the timer's name with .service)
+    every: int = 0                  # expected interval in seconds (from "6h", "1d", ...); 0: don't watch for missed runs
+    grace: int = 0                  # how late a run may be before it counts as missed (default: 10%, at least 10 min)
+
+    def __post_init__(self):
+        self.every = seconds(self.every) if self.every else 0
+        self.grace = seconds(self.grace) if self.grace else max(600, self.every // 10)
+        if self.timer and not self.service:
+            self.service = self.timer.removesuffix(".timer") + ".service"
+
+
+def _registry() -> dict:
     try:
-        raw = json.loads(REGISTRY.read_text())
+        return json.loads(REGISTRY.read_text())
     except FileNotFoundError:
-        return []
+        return {}
+
+
+def load_services() -> list[Service]:
     known = Service.__dataclass_fields__
-    return [Service(**{k: v for k, v in s.items() if k in known}) for s in raw.get("services", [])]
+    return [Service(**{k: v for k, v in s.items() if k in known}) for s in _registry().get("services", [])]
+
+
+def load_jobs() -> list[Job]:
+    known = Job.__dataclass_fields__
+    return [Job(**{k: v for k, v in j.items() if k in known}) for j in _registry().get("jobs", [])]

@@ -199,6 +199,25 @@ def _refresh_git(svc, fetch):
                         "checked": time.time() if fetch else prev.get("checked"), "check_failed": fetched is False}
 
 
+def _git_log(repo, rev, n):
+    _, out = run(["git", "-C", repo, "log", f"-{n}", "--format=%h%x00%s%x00%ct%x00%an", rev])
+    commits = []
+    for line in out.splitlines():
+        parts = line.split("\x00")
+        if len(parts) == 4 and parts[2].isdigit():
+            commits.append({"sha": parts[0], "subject": parts[1], "time": int(parts[2]), "author": parts[3]})
+    return commits
+
+
+def code_history(svc):
+    """For a git checkout: the commits waiting upstream that an update would bring, and the latest ones running now."""
+    if (source.get(svc.name) or {}).get("kind") != "git":
+        return None
+    repo = str(svc.repo_path)
+    pending = _git_log(repo, "HEAD..@{u}", 20) if source[svc.name].get("behind") else []
+    return {"pending": pending, "recent": _git_log(repo, "HEAD", 6)}
+
+
 def _refresh_image(svc, fetch):
     code, image = run(["docker", "inspect", "-f", "{{.Config.Image}}", svc.container or svc.name], timeout=10)
     image = image.strip()
@@ -260,6 +279,32 @@ def recent_logs(svc, lines=20) -> list[str]:
     return rows
 
 
+SIZE_UNITS = {"B": 1, "kB": 1e3, "KB": 1e3, "MB": 1e6, "GB": 1e9, "TB": 1e12}
+PRUNE_STEPS = [  # (command, the line that says how much it freed)
+    (["docker", "image", "prune", "-f"], r"Total reclaimed space:\s*([\d.]+)\s*([kKMGT]?B)"),
+    # build cache that `up --build` piles up; a week's worth stays, so rebuilds stay quick
+    (["docker", "builder", "prune", "-f", "--filter", "until=168h"], r"Total:\s*([\d.]+)\s*([kKMGT]?B)"),
+]
+
+
+def prune_images(job=None) -> str:
+    """Remove images that no tag points to and no container uses, and build cache older than a week:
+    what `compose pull` and `up --build` leave behind. Returns the space freed ("1.2 GB"), or ""."""
+    if not config.PRUNE_IMAGES or any(not j["done"] and j["action"] == "update" and j is not job for j in jobs.values()):
+        return ""  # another update may be building right now; the next update cleans up
+    freed = 0.0
+    for cmd, total_re in PRUNE_STEPS:
+        code, out = run(cmd, timeout=300)
+        m = re.search(total_re, out)
+        if job is not None:
+            job["lines"] += ["$ " + " ".join(cmd), m[0] if m else (out.strip().splitlines() or [""])[-1]]
+        if code == 0 and m:
+            freed += float(m[1]) * SIZE_UNITS[m[2]]
+    if freed < 1e6:
+        return ""
+    return f"{freed / 1e9:.1f} GB" if freed >= 1e9 else f"{freed / 1e6:.0f} MB"
+
+
 # ---- actions -----------------------------------------------------------------
 
 jobs: dict[str, dict] = {}
@@ -309,6 +354,7 @@ def start_job(svc, action, auto=False) -> dict:
                 ok = False
             if not ok:
                 break
+        freed = prune_images(job) if ok and action == "update" and svc.kind == "compose" and not auto else ""
         job["ok"], job["done"] = ok, True
         if action == "update":
             refresh_source(svc, fetch=False)
@@ -318,7 +364,8 @@ def start_job(svc, action, auto=False) -> dict:
         verb = {"start": "Started", "stop": "Stopped", "restart": "Restarted", "update": "Updated"}[action]
         from . import notify
         if ok:
-            notify.alert("info", f"{verb} {svc.name} from the dashboard", service=svc.name, discord=False)
+            notify.alert("info", f"{verb} {svc.name} from the dashboard", f"Freed {freed} of old images." if freed else "",
+                         service=svc.name, discord=False)
         else:
             notify.alert("error", f"{action.capitalize()} failed for {svc.name}",
                          "Started from the dashboard.", service=svc.name, log_lines=job["lines"][-15:])

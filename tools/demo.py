@@ -18,9 +18,10 @@ GB = 1024 ** 3
 random.seed(7)
 
 
-def timeline(now, blips=()):
+def timeline(now, blips=(), window=86400):
     """24 h of "up" with short blips: (hours_ago, minutes, state)."""
-    segs, t = [], now - 86400
+    segs, t = [], now - window
+    blips = [b for b in blips if b[0] * 3600 < window]
     for hours_ago, minutes, state in sorted(blips, reverse=True):
         a = now - hours_ago * 3600
         segs += [[t, a, "up"], [a, a + minutes * 60, state]]
@@ -34,9 +35,69 @@ def series(base, wave, noise, n=72):
     return [round(max(0, base + wave * math.sin(i / 9) + random.uniform(-noise, noise)), 1) for i in range(n)]
 
 
+def traffic(n, base, burst_every, burst):
+    """Bytes/s: a quiet baseline with bursts (backups, streams)."""
+    return [round(base * random.uniform(0.6, 1.4) + (burst * random.uniform(0.7, 1) if i % burst_every in (0, 1) else 0)) for i in range(n)]
+
+
+def jobs(now, trouble):
+    def runs(every, n, took, fail_at=()):
+        return [{"t": now - every * (n - i) + 1800, "ok": i not in fail_at, "code": 0 if i not in fail_at else 1, "took": took}
+                for i in range(n)]
+    backup = runs(86400, 7, 412, fail_at=(6,) if trouble else (3,))
+    return [
+        {"name": "nightly-backup", "description": "restic backup of ~/services to the NAS", "kind": "timer",
+         "timer": "backup.timer", "user": False, "every": 86400, "grace": 8640, "state": "failed" if trouble else "ok",
+         "last": backup[-1], "next": now + 15 * 3600, "runs": backup, "can_run": True, "has_log": True},
+        {"name": "photo-sync", "description": "Copies new phone photos off the shared folder", "kind": "ping",
+         "timer": "", "user": False, "every": 6 * 3600, "grace": 2160, "state": "ok", "last": runs(6 * 3600, 14, 38)[-1],
+         "next": now + 4 * 3600, "runs": runs(6 * 3600, 14, 38), "can_run": False, "has_log": True},
+        {"name": "cert-renew", "description": "", "kind": "timer", "timer": "certbot.timer", "user": False, "every": 0,
+         "grace": 600, "state": "ok", "last": runs(43200, 4, 6)[-1], "next": now + 7 * 3600, "runs": runs(43200, 4, 6),
+         "can_run": True, "has_log": True},
+    ]
+
+
+def service_history(name, rng, trouble):
+    window, step = {"6h": (6 * 3600, 300), "24h": (86400, 900), "7d": (7 * 86400, 3600)}.get(rng, (86400, 900))
+    now = time.time()
+    n = window // step
+    base = {"discord-bot": (0.8, 118), "music-server": (2.4, 262), "local-api": (0.1, 21)}.get(name, (1, 50))
+    random.seed(hash(name) % 1000)
+    cpu = [round(max(0, base[0] * (1 + 0.6 * math.sin(i / 5)) + random.uniform(-0.3, 0.3) * base[0]), 2) for i in range(n)]
+    mem = [round(base[1] * (1 + 0.04 * math.sin(i / 7)) + random.uniform(-3, 3), 1) for i in range(n)]
+    if name == "music-server":  # a slow leak, reset by the restart 9 h ago
+        restart = n - int(9 * 3600 / step)
+        mem = [round(base[1] * (0.7 + 0.5 * ((i - restart) % n) / n) + random.uniform(-4, 4), 1) for i in range(n)]
+    ms = [round(3 + random.uniform(0, 4) + (40 if i % 37 == 5 else 0)) for i in range(n)]
+    if name == "discord-bot" and trouble:
+        cpu[-1:] = mem[-1:] = ms[-1:] = [None]
+    svc = next(s for s in state(trouble)["services"] if s["name"] == name)
+    blips = [b for b in ([(17.5, 6, "down"), (40, 3, "down"), (100, 12, "unhealthy")] if name == "discord-bot" else []) if b[0] * 3600 < window]
+    tl = timeline(now, blips, window)
+    events = [e for e in state(trouble)["events"] if e.get("service") == name]
+    code = None
+    if svc["source"]["kind"] == "git":
+        code = {"pending": [{"sha": "8d01b7a", "subject": "Add /remind", "time": now - 3 * 3600, "author": "you"},
+                            {"sha": "c41e2d9", "subject": "Keep replies under Discord's 2000-character limit", "time": now - 5 * 3600, "author": "you"}][:svc["source"]["behind"]],
+                "recent": [{"sha": svc["source"]["sha"], "subject": svc["source"]["subject"], "time": svc["source"]["time"], "author": "you"},
+                           {"sha": "a17b3f0", "subject": "Retry the model once when it times out", "time": now - 4 * 86400, "author": "you"},
+                           {"sha": "02cd5e8", "subject": "Log how long each answer takes", "time": now - 6 * 86400, "author": "you"}]}
+    return {"now": now, "range": rng, "since": now - window, "step": step, "cpu": cpu, "mem": mem,
+            "ms": ms if name != "music-server" else ms, "peak": {"cpu": max(v for v in cpu if v is not None), "mem": max(v for v in mem if v is not None),
+                                                                "ms": max(v for v in ms if v is not None)},
+            "timeline": tl, "uptime": svc["uptime24"], "incidents": len(blips), "events": events, "code": code,
+            "config": {"kind": svc["kind"], "container": name if svc["kind"] == "compose" else "", "unit": "" if svc["kind"] == "compose" else f"{name}.service",
+                       "dir": f"~/services/{name}", "repo": "repo" if name == "discord-bot" else "", "health": "http://127.0.0.1:8080/health",
+                       "url": svc.get("url", ""), "check": "", "update": ["git -C repo pull --ff-only", "docker compose up -d --build"] if name == "discord-bot" else ["docker compose pull", "docker compose up -d"]}}
+
+
 def state(trouble):
     now = time.time()
+    random.seed(7)
     cpu, temp, mem = series(14, 9, 5), series(47, 4, 1.2), series(38, 3, 1)
+    rx, tx = traffic(72, 40_000, 12, 2_600_000), traffic(72, 12_000, 12, 900_000)
+    offline = [41 <= i <= 43 for i in range(72)]
     bot_state = "down" if trouble else "up"
     services = [
         {
@@ -89,14 +150,18 @@ def state(trouble):
         cpu[-1], temp[-1] = 88, 78
     return {
         "now": now, "hostname": "homelab", "muted_until": 0, "events": events, "services": services,
-        "history": {"cpu": cpu, "temp": temp, "mem": mem,
-                    "peak": {"cpu": max(cpu) + 12, "temp": max(temp) + 1, "mem": max(mem)}},
+        "jobs": jobs(now, trouble), "heartbeat": {"ok": True, "t": now - 70, "error": "", "every": 120},
+        "history": {"cpu": cpu, "temp": temp, "mem": mem, "rx": rx, "tx": tx, "offline": offline,
+                    "peak": {"cpu": max(cpu) + 12, "temp": max(temp) + 1, "mem": max(mem), "rx": max(rx) * 1.3, "tx": max(tx) * 1.2}},
         "pi": {
             "model": "Raspberry Pi 4 Model B Rev 1.5", "os": "Debian GNU/Linux 13 (trixie)", "kernel": "6.12",
             "cpu": cpu[-1], "load": [0.42, 0.37, 0.31], "cores": 4, "temp": temp[-1],
             "mem": {"total": 3.7 * GB, "available": 2.3 * GB}, "swap": {"total": 2 * GB, "free": 2 * GB},
             "disk": {"total": 28.7 * GB, "used": 9.4 * GB, "free": 19.3 * GB}, "uptime": 26 * 3600 + 1500,
-            "power": {"value": "0x0", "flags": []}, "reboot_required": False,
+            "power": {"value": "0x0", "flags": []}, "reboot_required": False, "reboot_packages": [],
+            "net": {"rx": rx[-1], "tx": tx[-1]},
+            "updates": {"count": 7, "security": 2, "checked": now - 5 * 3600,
+                        "packages": ["openssl", "libssl3", "curl", "libcurl4", "raspi-firmware", "tzdata", "vim-common"]},
             "network": {"addresses": {"wlan0": "192.168.1.40"}, "wifi": {"ssid": "home-wifi", "signal": 71},
                         "tailscale": {"state": "Running", "name": "homelab.example.ts.net"}},
         },
@@ -139,6 +204,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._send((STATIC / path[8:]).read_bytes(), ctype + "; charset=utf-8")
         if path == "/api/state":
             return self._send(state(self.trouble))
+        if path.endswith("/history"):
+            from urllib.parse import parse_qs
+            name = path.split("/")[3]
+            rng = parse_qs(urlparse(self.path).query).get("range", ["24h"])[0]
+            return self._send(service_history(name, rng, self.trouble))
+        if path.endswith("/output"):
+            return self._send({"lines": ["Scanning /sdcard/DCIM …", "12 new photos, 48.2 MB", "Copied to /mnt/photos/2026/10"]})
         if path.endswith("/logs"):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")

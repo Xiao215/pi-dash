@@ -19,6 +19,10 @@ password_hash = ""
 registry = "~/services/services.json"
 # Prepended to PATH for update steps and checks, e.g. where `claude` or a Node version manager lives.
 extra_path = ["~/.local/bin"]
+# After a Docker service updates and comes back healthy, remove what the update left behind: untagged
+# images no container uses (`docker image prune -f`) and build cache older than a week
+# (`docker builder prune -f --filter until=168h`). Otherwise every update keeps the old image on the SD card.
+prune_images = true
 
 [discord]
 # Channel webhook (Server Settings → Integrations → Webhooks). Empty: alerts stay on the dashboard.
@@ -26,6 +30,14 @@ webhook_url = ""
 # Your Discord user ID (Settings → Advanced → Developer Mode, then right-click your name → Copy User ID).
 # Red alerts @mention you. Empty: no pings.
 ping_user_id = ""
+
+[heartbeat]
+# pi-dash can't tell you the Pi is off when the Pi is off. Make a check on an outside service such as
+# healthchecks.io (free) or Uptime Kuma (a "push" monitor), paste its ping URL here, and that service
+# alerts you (Discord, email, phone) when the pings stop. Pings stop when the Pi loses power or internet,
+# or when pi-dash itself stops working. Set the check's period a little above `every`.
+url = ""
+every = 120              # seconds between pings
 
 [schedule]
 digest_hour = 9          # morning summary, local time; -1 turns it off

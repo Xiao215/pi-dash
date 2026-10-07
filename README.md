@@ -12,9 +12,12 @@ No dependencies: Python 3.11+ standard library and one static page. It uses abou
 ## What it does
 
 - **Services** (Docker Compose, systemd user or system units): running state, a 24 h uptime timeline, CPU and memory, health check, the commit or image that's running and whether a newer one exists. Live logs with search; start, stop, restart and update buttons.
-- **The machine**: CPU, memory and temperature over the last 6 h, disk, power (Raspberry Pi under-voltage), Wi-Fi, Tailscale. Restart or shut down from the menu.
-- **Discord alerts**, only when something is wrong: a crash (with its last log lines), errors in a service's log, a service down or back up, disk filling up, overheating, low power, failed systemd units or automatic updates, and every restart of the machine with the reason. Red alerts can @mention you. A morning summary, and a mute switch for when you're tinkering.
-- **Auto-update**: every 5 minutes it checks for a new commit (services built from a git checkout) or a newly published image (services that pull one). If there is one it runs the service's update steps, waits for it to come back healthy, and tells you. A version that fails isn't retried until a newer one appears. It can be switched off per service.
+- **A page per service** (click its card): uptime, CPU, memory and health-check response time over 6 h, 24 h or 7 days; the commits an update would bring; everything that happened to it; how it's set up.
+- **Scheduled jobs**: systemd timers and cron jobs, with their last runs, how long they took and when they're next due.
+- **The machine**: CPU, memory, temperature and network traffic over the last 6 h (with internet outages marked), disk, power (Raspberry Pi under-voltage), Wi-Fi, Tailscale, waiting OS updates. Restart or shut down from the menu.
+- **Discord alerts**, only when something is wrong: a crash (with its last log lines), errors in a service's log, a service down or back up, memory that keeps growing, a scheduled job that failed or didn't run, disk filling up, overheating, low power, failed systemd units or automatic updates, an internet outage (once it's back), and every restart of the machine with the reason. Red alerts can @mention you. A morning summary, and a mute switch for when you're tinkering.
+- **An outside heartbeat**, optional: a service such as healthchecks.io hears from the Pi every 2 minutes and tells you when it stops, so a Pi that lost power doesn't just go quiet.
+- **Auto-update**: every 5 minutes it checks for a new commit (services built from a git checkout) or a newly published image (services that pull one). If there is one it runs the service's update steps, waits for it to come back healthy, and tells you. A version that fails isn't retried until a newer one appears. It can be switched off per service. Once a Docker service's update works, the old image it left behind and build cache older than a week are removed, so updates don't slowly fill the SD card (`prune_images` in the config).
 
 When something breaks, the header, the card and the history say so, and Discord pings you:
 
@@ -68,7 +71,42 @@ List them in `~/services/services.json`; [examples/services.example.json](exampl
 
 Then reload the list: `curl -X POST -H 'X-Pi-Dash: 1' http://localhost:9000/api/reload`.
 
+## Scheduled jobs
+
+Add backups, syncs and other periodic work under `"jobs"` in the same file (see the example). Each job is one of two kinds:
+
+- **A systemd timer**: `"timer": "backup.timer"` (and `"user": true` for a `systemctl --user` timer). pi-dash reads every run from systemd: when it started, how long it took, its exit code. The card gets Logs and Run now buttons.
+- **Anything else** (cron, a script on another machine): it reports each run to `/api/ping/<name>`, optionally with an exit code and its output. From the Pi itself no password or header is needed:
+
+  ```bash
+  0 */6 * * * out=$(/home/pi/bin/sync-photos 2>&1); curl -fsS --data-binary "$out" localhost:9000/api/ping/photo-sync/$?
+  ```
+
+  `/api/ping/<name>` alone means it worked; `/<exit code>` or `/fail` reports a failure, and the body becomes the log lines in the alert.
+
+| Field | |
+|---|---|
+| `name`, `description` | shown in the list |
+| `timer`, `user` | the systemd timer, and whether it's a user timer |
+| `service` | the unit the timer starts, if not the timer's name with `.service` |
+| `every` | how often it should run (`"30m"`, `"6h"`, `"1d"` or seconds); with it, pi-dash alerts when a run is missed |
+| `grace` | how late a run may be before that counts as missed (default 10 % of `every`, at least 10 min) |
+
+A failed run alerts you with its last log lines; so does a missed one, and a timer that was switched off. Their failures aren't reported a second time as crashed or failed units.
+
 Tips: give containers `restart: unless-stopped` and a fixed `container_name`. Send Docker logs to journald (`"log-driver": "journald"` in `/etc/docker/daemon.json`) so the dashboard can show and watch them. Published Docker ports bypass ufw; prefer `network_mode: host` or binding to `127.0.0.1`.
+
+## Knowing when the Pi is off
+
+The Discord alerts come from the Pi, so if it loses power or its connection, they stop, which looks the same as all being well. For that case, make a check on an outside service, for example [healthchecks.io](https://healthchecks.io) (free; it can alert you on Discord, by email or on your phone) or a "push" monitor in Uptime Kuma, and put its ping URL in `config.toml`:
+
+```toml
+[heartbeat]
+url = "https://hc-ping.com/your-check-id"
+every = 120
+```
+
+pi-dash pings it every 2 minutes for as long as its own checks keep running; set the check's period a little longer, e.g. 5 minutes. The dashboard shows when the last ping went out.
 
 ## Updating pi-dash
 

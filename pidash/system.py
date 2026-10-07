@@ -1,8 +1,9 @@
-"""The Pi itself: CPU, memory, temperature, power, disk, network."""
+"""The Pi itself: CPU, memory, temperature, power, disk, network, pending OS updates."""
 
 import json
 import os
 import shutil
+import socket
 import subprocess
 import threading
 import time
@@ -19,9 +20,13 @@ THROTTLE_BITS = {  # vcgencmd get_throttled
     19: "temperature limit since boot",
 }
 
-_cpu = {"pct": 0.0}
+# Interfaces whose traffic is counted elsewhere already (Tailscale rides on wlan0/eth0) or never leaves the Pi.
+VIRTUAL = ("lo", "docker", "veth", "br-", "tailscale", "wg", "tun", "virbr", "cni", "flannel")
+
+_live = {"cpu": 0.0, "rx": 0.0, "tx": 0.0}  # CPU %, network bytes/s over the last 5 s
 _slow: dict = {}  # cached results of slower commands
 _slow_at: dict = {}
+updates: dict | None = None  # pending apt upgrades; refreshed by the health loop (apt is slow)
 
 
 def run(cmd, timeout=10) -> str:
@@ -31,22 +36,92 @@ def run(cmd, timeout=10) -> str:
         return ""
 
 
-def _cpu_sampler():
-    def read():
+def parse_net_dev(text: str) -> tuple[int, int]:
+    """/proc/net/dev -> total (received, sent) bytes over the real interfaces."""
+    rx = tx = 0
+    for line in text.splitlines()[2:]:
+        name, _, data = line.partition(":")
+        fields = data.split()
+        if len(fields) < 9 or name.strip().startswith(VIRTUAL):
+            continue
+        rx += int(fields[0])
+        tx += int(fields[8])
+    return rx, tx
+
+
+def net_totals() -> tuple[int, int]:
+    try:
+        return parse_net_dev(Path("/proc/net/dev").read_text())
+    except OSError:
+        return 0, 0
+
+
+def _live_sampler():
+    def cpu():
         parts = list(map(int, Path("/proc/stat").read_text().split("\n", 1)[0].split()[1:]))
-        idle = parts[3] + parts[4]
-        return sum(parts), idle
-    total, idle = read()
+        return sum(parts), parts[3] + parts[4]
+    (total, idle), net, t = cpu(), net_totals(), time.monotonic()
     while True:
         time.sleep(5)
-        t2, i2 = read()
+        (t2, i2), net2, now = cpu(), net_totals(), time.monotonic()
         if t2 > total:
-            _cpu["pct"] = round(100 * (1 - (i2 - idle) / (t2 - total)), 1)
-        total, idle = t2, i2
+            _live["cpu"] = round(100 * (1 - (i2 - idle) / (t2 - total)), 1)
+        if net2[0] >= net[0] and net2[1] >= net[1]:  # counters reset when an interface goes away
+            _live["rx"], _live["tx"] = ((b - a) / (now - t) for a, b in zip(net, net2))
+        total, idle, net, t = t2, i2, net2, now
 
 
 def start():
-    threading.Thread(target=_cpu_sampler, name="cpu", daemon=True).start()
+    threading.Thread(target=_live_sampler, name="live", daemon=True).start()
+
+
+def online() -> bool:
+    """Can the Pi reach the internet? Two well-known anycast addresses, so one outage doesn't count."""
+    for addr in (("1.1.1.1", 443), ("8.8.8.8", 53)):
+        try:
+            socket.create_connection(addr, timeout=3).close()
+            return True
+        except OSError:
+            continue
+    return False
+
+
+def parse_upgradable(out: str) -> list[dict]:
+    """`apt list --upgradable` -> [{"name", "security"}]. Lines look like
+    openssl/stable-security 3.0.17-1~deb12u3 arm64 [upgradable from: 3.0.17-1~deb12u2]"""
+    pkgs = []
+    for line in out.splitlines():
+        if "[upgradable from" not in line or "/" not in line:
+            continue
+        name, rest = line.split("/", 1)
+        pkgs.append({"name": name, "security": "-security" in rest.split(" ", 1)[0]})
+    return pkgs
+
+
+def _mtime(path):
+    try:
+        return Path(path).stat().st_mtime
+    except OSError:
+        return None
+
+
+_apt_seen = None
+
+
+def refresh_updates():
+    """What apt would upgrade. Uses the package lists the system's daily apt timer downloads; doesn't refresh them.
+    apt takes a few seconds on a Pi, so it only asks again after the lists or the installed packages changed."""
+    global updates, _apt_seen
+    if not shutil.which("apt"):
+        return
+    seen = (_mtime("/var/lib/apt/lists"), _mtime("/var/lib/dpkg/status"))
+    if updates is not None and seen == _apt_seen:
+        return
+    _apt_seen = seen
+    pkgs = parse_upgradable(run(["apt", "list", "--upgradable"], timeout=120))
+    checked = _mtime("/var/lib/apt/periodic/update-success-stamp") or seen[0]
+    updates = {"count": len(pkgs), "security": sum(p["security"] for p in pkgs),
+               "packages": [p["name"] for p in sorted(pkgs, key=lambda p: not p["security"])][:40], "checked": checked}
 
 
 def _cached(key, ttl, fn):
@@ -132,7 +207,7 @@ def snapshot() -> dict:
     value, flags = _cached("throttled", 30, throttled)
     return {
         **_cached("static", 86400, _static),
-        "cpu": _cpu["pct"],
+        "cpu": _live["cpu"],
         "load": os.getloadavg(),
         "cores": os.cpu_count(),
         "temp": temperature(),
@@ -142,5 +217,15 @@ def snapshot() -> dict:
         "uptime": uptime(),
         "power": {"value": hex(value), "flags": flags},
         "reboot_required": Path("/var/run/reboot-required").exists(),
+        "reboot_packages": _reboot_packages(),
         "network": _cached("network", 60, _network),
+        "net": {"rx": round(_live["rx"]), "tx": round(_live["tx"])},
+        "updates": updates,
     }
+
+
+def _reboot_packages() -> list[str]:
+    try:
+        return sorted(set(Path("/var/run/reboot-required.pkgs").read_text().split()))
+    except OSError:
+        return []

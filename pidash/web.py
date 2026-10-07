@@ -12,7 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import auth, config, notify, services, store, system, watch
+from . import auth, config, notify, scheduled, services, store, system, watch
 
 log = logging.getLogger(__name__)
 STATIC = Path(__file__).resolve().parent.parent / "static"
@@ -36,11 +36,11 @@ def _host_allowed(host: str) -> bool:
         return False
 
 
-def _timeline(since):
-    """Per service, the last 24 h as [[start, end, state], ...]: one stretch per run of equal minute samples.
-    Gaps with no samples (pi-dash or the machine was off) are left out."""
+def _timeline(since, rows=None):
+    """Per service, the time since `since` as [[start, end, state], ...]: one stretch per run of equal minute
+    samples. Gaps with no samples (pi-dash or the machine was off) are left out."""
     out: dict[str, list] = {}
-    rows = store.samples(since)
+    rows = store.samples(since) if rows is None else rows
     for i, row in enumerate(rows):
         t = max(row["t"], since)
         nxt = rows[i + 1]["t"] if i + 1 < len(rows) else None
@@ -65,31 +65,70 @@ def state():
         s["incidents"] = sum(1 for seg in s["timeline"] if seg[2] in ("down", "unhealthy", "missing"))
         s["uptime24"] = watch.uptime_pct(svc.name, since)
         svcs.append(s)
+    heartbeat = {**watch.heartbeat, "every": config.HEARTBEAT_EVERY} if config.HEARTBEAT_URL else None
     return {"now": now, "hostname": config.HOSTNAME, "pi": system.snapshot(), "services": svcs,
-            "events": store.events(80), "history": _history(now),
+            "jobs": [scheduled.status(j, now) for j in scheduled.jobs_list()],
+            "events": store.events(80), "history": _history(now), "heartbeat": heartbeat,
             "muted_until": store.load_state().get("muted_until", 0), "auth": bool(config.PASSWORD_HASH)}
 
 
+def _buckets(rows, since, n, step, get):
+    """Averages of get(row) per step-long bucket (None where nothing was recorded), and the highest single value."""
+    sums, counts, peak = [0.0] * n, [0] * n, None
+    for row in rows:
+        v = get(row)
+        i = int((row["t"] - since) / step)
+        if v is None or i < 0:
+            continue
+        i = min(n - 1, i)
+        sums[i] += v
+        counts[i] += 1
+        peak = v if peak is None else max(peak, v)
+    return [round(s / c, 1) if c else None for s, c in zip(sums, counts)], peak
+
+
 def _history(now, window=6 * 3600, step=300):
-    """The Pi's CPU / temperature / memory for the last 6 h: 5-minute averages, plus real peaks."""
+    """The Pi's CPU, temperature, memory and network for the last 6 h: 5-minute averages, plus real peaks,
+    and which of those 5 minutes had the internet down."""
     since = now - window
     n = int(window / step)
-    sums = {k: [0.0] * n for k in ("cpu", "temp", "mem")}
-    counts = [0] * n
-    peaks = {k: None for k in sums}
-    for row in store.samples(since):
-        p = row.get("p")
-        if not p:
-            continue
-        i = min(n - 1, int((row["t"] - since) / step))
-        counts[i] += 1
-        for k in sums:
-            v = p.get(k) or 0
-            sums[k][i] += v
-            peaks[k] = v if peaks[k] is None else max(peaks[k], v)
-    out = {k: [round(v / c, 1) if c else None for v, c in zip(vals, counts)] for k, vals in sums.items()}
+    rows = store.samples(since)
+    out, peaks = {}, {}
+    for k in ("cpu", "temp", "mem", "rx", "tx"):
+        out[k], peaks[k] = _buckets(rows, since, n, step, lambda r, k=k: (r.get("p") or {}).get(k))
+    offline, _ = _buckets(rows, since, n, step, lambda r: None if "p" not in r else 0 if r["p"].get("online", True) else 1)
+    out["offline"] = [bool(v) for v in offline]
     out["peak"] = peaks
     return out
+
+
+RANGES = {"6h": (6 * 3600, 300), "24h": (86400, 900), "7d": (7 * 86400, 3600)}
+
+
+def service_history(svc, rng):
+    """One service over 6 h, 24 h or 7 days: CPU, memory and health-check time, its up/down stretches,
+    what happened to it, the code it runs and how it's set up."""
+    window, step = RANGES.get(rng, RANGES["24h"])
+    now = time.time()
+    since = now - window
+    n = window // step
+    rows = store.samples(since)
+    name = svc.name
+
+    def res(i):
+        return lambda r: ((r.get("r") or {}).get(name) or (None, None, None))[i]
+    series, peaks = {}, {}
+    for i, k in enumerate(("cpu", "mem", "ms")):
+        series[k], peaks[k] = _buckets(rows, since, n, step, res(i))
+    timeline = _timeline(since, rows).get(name, [])
+    config_view = {"kind": svc.kind, "container": svc.container or (svc.name if svc.kind == "compose" else ""),
+                   "unit": svc.unit, "dir": svc.dir, "repo": svc.repo, "health": svc.health, "url": svc.url,
+                   "check": svc.check.get("command", ""), "update": svc.update}
+    return {"now": now, "range": rng if rng in RANGES else "24h", "since": since, "step": step, **series, "peak": peaks,
+            "timeline": timeline, "uptime": watch.uptime_pct(name, since, rows),
+            "incidents": sum(1 for seg in timeline if seg[2] in ("down", "unhealthy", "missing")),
+            "events": [e for e in store.events(2000, since) if e.get("service") == name][:60],
+            "code": services.code_history(svc), "config": config_view}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -180,17 +219,29 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json({"error": "no such job"}, 404)
                 start = int(parse_qs(url.query).get("from", ["0"])[0])
                 return self._json({**job, "lines": job["lines"][start:], "total": len(job["lines"])})
-            if parts[:2] == ["api", "services"] and len(parts) == 4 and parts[3] == "logs":
+            if parts[:2] == ["api", "services"] and len(parts) == 4 and parts[3] in ("logs", "history"):
                 svc = self._service(parts[2])
-                return self._logs(svc) if svc else self._json({"error": "no such service"}, 404)
+                if not svc:
+                    return self._json({"error": "no such service"}, 404)
+                if parts[3] == "history":
+                    return self._json(service_history(svc, parse_qs(url.query).get("range", ["24h"])[0]))
+                return self._logs(svc)
+            if parts[:2] == ["api", "scheduled"] and len(parts) == 4 and parts[3] in ("logs", "output"):
+                job = scheduled.get(parts[2])
+                if not job:
+                    return self._json({"error": "no such job"}, 404)
+                if parts[3] == "output":  # what the last ping sent along
+                    return self._json({"lines": store.load_state().get("job_logs", {}).get(job.name, [])})
+                return self._logs(scheduled.as_service(job)) if job.timer else self._json({"error": "not a timer"}, 400)
         except BrokenPipeError:
             return
         self._json({"error": "not found"}, 404)
 
     def do_POST(self):
-        if not self._guard(write=True):
-            return
         parts = [p for p in urlparse(self.path).path.split("/") if p]
+        local_ping = parts[:2] == ["api", "ping"] and self._direct_local()  # cron on the Pi: plain `curl -d`
+        if not self._guard(write=not local_ping):
+            return
         if parts == ["api", "login"]:
             return self._login()
         if parts == ["api", "logout"]:
@@ -214,6 +265,23 @@ class Handler(BaseHTTPRequestHandler):
             if action not in ("start", "stop", "restart", "update") or (action == "update" and not svc.update):
                 return self._json({"error": "unknown action"}, 400)
             return self._json(services.start_job(svc, action))
+        if parts[:2] == ["api", "ping"] and len(parts) in (3, 4):
+            job = scheduled.get(parts[2])
+            if not job:
+                return self._json({"error": f"no job named {parts[2]!r} in {config.REGISTRY}; add it under \"jobs\" "
+                                   "and reload"}, 404)
+            try:
+                scheduled.ping(job, parts[3] if len(parts) == 4 else "", self._text_body())
+            except ValueError as e:
+                return self._json({"error": str(e)}, 400)
+            return self._json({"ok": True})
+        if parts[:2] == ["api", "scheduled"] and len(parts) == 4 and parts[3] == "run":
+            job = scheduled.get(parts[2])
+            if not job or not job.timer:
+                return self._json({"error": "no such timer"}, 404)
+            scheduled.run_now(job)
+            notify.alert("info", f"Started {job.name} from the dashboard", service=job.name, discord=False)
+            return self._json({"ok": True})
         if parts == ["api", "mute"]:
             hours = float(self._body().get("hours", 0))
             until = time.time() + hours * 3600 if hours > 0 else 0
@@ -237,7 +305,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": True})
         if parts == ["api", "reload"]:
             watch.reload_services()
-            return self._json({"ok": True, "services": [s.name for s in watch.services_list()]})
+            return self._json({"ok": True, "services": [s.name for s in watch.services_list()],
+                               "jobs": [j.name for j in scheduled.jobs_list()]})
         self._json({"error": "not found"}, 404)
 
     def _body(self) -> dict:
@@ -246,6 +315,10 @@ class Handler(BaseHTTPRequestHandler):
             return json.loads(self.rfile.read(n) or b"{}") if 0 < n < 65536 else {}
         except ValueError:
             return {}
+
+    def _text_body(self, limit=65536) -> str:
+        n = int(self.headers.get("Content-Length") or 0)
+        return self.rfile.read(min(n, limit)).decode("utf-8", "replace") if n > 0 else ""
 
     def _file(self, path: Path):
         path = path.resolve()

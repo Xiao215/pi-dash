@@ -5,13 +5,15 @@ import json
 import logging
 import re
 import shutil
+import statistics
 import subprocess
 import threading
 import time
+import urllib.request
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from . import config, services, store, system
+from . import config, scheduled, services, store, system
 from .notify import alert
 
 log = logging.getLogger(__name__)
@@ -22,11 +24,14 @@ _suppressed: dict[str, int] = {}
 _last_crash: dict[str, float] = {}
 _alerted_down: set[str] = set()
 _bad_streak: dict[str, int] = {}
+_last_tick = time.time()  # when the sampler last finished a round; the heartbeat only goes out while it keeps going
+heartbeat = {"ok": None, "t": 0.0, "error": ""}
 
 
 def reload_services():
     _services.clear()
     _services.update({s.name: s for s in config.load_services()})
+    scheduled.reload()
 
 
 def services_list():
@@ -155,6 +160,8 @@ def _journal():
             # systemd telling us a unit failed (system units too, e.g. a failed update)
             from_manager = entry.get("_PID") == "1" or entry.get("_COMM") == "systemd"
             if from_manager and "Failed with result" in msg:
+                if (entry.get("UNIT") or entry.get("USER_UNIT")) in scheduled.units():
+                    continue  # a scheduled job: scheduled.py reports it as "<job> failed"
                 name = svc.name if svc else (entry.get("UNIT") or entry.get("USER_UNIT") or "a system service")
                 if svc and name in store.load_state().get("stopped", []):
                     continue
@@ -183,17 +190,24 @@ def _journal():
 # ---- up/down: sampled every minute, also feeds the uptime bars -----------------
 
 def _sampler():
+    global _last_tick
+    net_prev = (system.net_totals(), time.monotonic())
+    offline_since = None
     while True:
-        states = {}
+        states, res = {}, {}
         for svc in list(_services.values()):
             services.check_health(svc)
             services.run_check(svc)
             try:
-                st = services.status(svc)["state"]
+                s = services.status(svc)
+                st = s["state"]
             except Exception:  # noqa: BLE001
                 log.exception("status failed for %s", svc.name)
-                st = "unknown"
+                s, st = {}, "unknown"
             states[svc.name] = st
+            h = services.health.get(svc.name)
+            res[svc.name] = [s.get("cpu"), round(s["mem"] / 2 ** 20, 1) if s.get("mem") is not None else None,
+                             h["ms"] if h and h["ok"] else None]
             bad = st in ("down", "unhealthy") and not services.running_job(svc)  # not mid-update
             _bad_streak[svc.name] = _bad_streak.get(svc.name, 0) + 1 if bad else 0
             if bad and _bad_streak[svc.name] == 2 and svc.name not in _alerted_down:
@@ -209,9 +223,55 @@ def _sampler():
                 _alerted_down.discard(svc.name)
                 alert("ok", f"{svc.name} is back up", service=svc.name)
         snap = system.snapshot()
+        net, now = system.net_totals(), time.monotonic()
+        (rx0, tx0), t0 = net_prev
+        rx, tx = ((b - a) / (now - t0) if b >= a and now > t0 else None for a, b in zip((rx0, tx0), net))
+        net_prev = (net, now)
+        online = system.online()
         store.add_sample(states, {"cpu": snap["cpu"], "temp": round(snap["temp"], 1) if snap["temp"] is not None else None,
-                                  "mem": round(100 - 100 * snap["mem"]["available"] / snap["mem"]["total"], 1)})
+                                  "mem": round(100 - 100 * snap["mem"]["available"] / snap["mem"]["total"], 1),
+                                  "rx": round(rx) if rx is not None else None, "tx": round(tx) if tx is not None else None,
+                                  "online": online}, res)
+        offline_since = _internet(online, offline_since)
+        _last_tick = time.time()
         time.sleep(config.SAMPLE_EVERY)
+
+
+def _internet(online, offline_since):
+    """Note outages of the Pi's internet. Discord can't be reached meanwhile, so it hears afterwards."""
+    now = time.time()
+    if not online:
+        return offline_since or now
+    if offline_since and now - offline_since >= 120:
+        alert("warn", "Internet was down", f"For about {_ago(now - offline_since)}, from {datetime.fromtimestamp(offline_since):%H:%M} "
+              f"to {datetime.now():%H:%M}. Alerts from that time arrive late.")
+    return None
+
+
+# ---- outside heartbeat: someone else notices when this Pi goes quiet ---------------------
+
+def _heartbeat():
+    while True:
+        if time.time() - _last_tick < 5 * 60:  # watchers still working: say so
+            try:
+                req = urllib.request.Request(config.HEARTBEAT_URL, headers={"User-Agent": "pi-dash"})
+                urllib.request.urlopen(req, timeout=15).close()
+                heartbeat.update(ok=True, t=time.time(), error="")
+            except Exception as e:  # noqa: BLE001 - offline, DNS, HTTP errors: try again next time
+                heartbeat.update(ok=False, t=time.time(), error=str(getattr(e, "reason", e))[:200])
+        time.sleep(config.HEARTBEAT_EVERY)
+
+
+# ---- scheduled jobs --------------------------------------------------------------------
+
+def _jobs_loop():
+    time.sleep(10)
+    while True:
+        try:
+            scheduled.poll()
+        except Exception:  # noqa: BLE001
+            log.exception("checking scheduled jobs failed")
+        time.sleep(60)
 
 
 # ---- auto-update: new commit on GitHub or newly published image -----------------------
@@ -273,6 +333,9 @@ def _maybe_auto_update(svc):
             detail = f"{before} → {after.get('sha')}: {after.get('subject', '')}"
         else:
             detail = f"Now running the image published {_ago(time.time() - after['time'])} ago." if after.get("time") else "Now running the newest image."
+        freed = services.prune_images() if svc.kind == "compose" else ""  # only now that the new version works
+        if freed:
+            detail += f"\nFreed {freed} of old images."
         alert("update", f"{svc.name} updated", detail, svc.name)
         return
     _remember("failed_updates", svc.name, target)
@@ -287,15 +350,44 @@ def _maybe_auto_update(svc):
 
 # ---- the Pi's health, every 10 minutes; alerts only on change --------------------
 
-def _check(key, bad: bool, level, title, detail, ok_title):
+def _check(key, bad: bool, level, title, detail, ok_title, service=None):
     problems = store.load_state().get("problems", {})
     if bad and key not in problems:
         problems[key] = time.time()
-        alert(level, title, detail)
+        alert(level, title, detail, service)
     elif not bad and key in problems:
         since = problems.pop(key)
-        alert("ok", ok_title, f"Lasted {_ago(time.time() - since)}.")
+        alert("ok", ok_title, f"Lasted {_ago(time.time() - since)}.", service)
     store.update_state(problems=problems)
+
+
+def memory_growth(rows, name, chunks=6):
+    """(first, last) hourly median memory in MB when a service's memory rose steadily through the rows
+    (by half and 150 MB at least, never dropping back), else None. A restart drops it, so that doesn't count."""
+    pts = [(r["t"], r["r"][name][1]) for r in rows if (r.get("r", {}).get(name) or [None, None])[1] is not None]
+    if len(pts) < 50 * chunks or pts[-1][0] - pts[0][0] < 0.9 * chunks * 3600:
+        return None
+    t0, span = pts[0][0], (pts[-1][0] - pts[0][0]) / chunks
+    parts = [[] for _ in range(chunks)]
+    for t, mb in pts:
+        parts[min(chunks - 1, int((t - t0) / span))].append(mb)
+    if not all(parts):
+        return None
+    med = [statistics.median(p) for p in parts]
+    steady = all(b >= a * 0.97 for a, b in zip(med, med[1:]))
+    if steady and med[-1] >= 1.5 * med[0] and med[-1] - med[0] >= 150:
+        return med[0], med[-1]
+    return None
+
+
+def _check_memory_growth():
+    rows = store.samples(time.time() - 6 * 3600)
+    for svc in list(_services.values()):
+        grew = memory_growth(rows, svc.name)
+        detail = (f"From {grew[0]:.0f} MB to {grew[1]:.0f} MB over 6 hours without a restart. It may be leaking memory; "
+                  "restarting it frees it for now.") if grew else ""
+        _check(f"leak:{svc.name}", bool(grew), "warn", f"{svc.name}'s memory keeps growing", detail,
+               f"{svc.name}'s memory stopped growing", svc.name)
 
 
 def _health_once():
@@ -323,11 +415,13 @@ def _health_once():
                   "The Pi saw low voltage at some point. A weak supply can corrupt the SD card over time.")
     _, user_failed = services.run(["systemctl", "--user", "--failed", "--plain", "--no-legend"])
     _, sys_failed = services.run(["systemctl", "--failed", "--plain", "--no-legend"])
-    failed = sorted({l.split()[0] for l in (sys_failed + user_failed).splitlines() if l.strip()})
+    failed = sorted({l.split()[0] for l in (sys_failed + user_failed).splitlines() if l.strip()} - scheduled.units())
     _check("failed-units", bool(failed), "warn", "Failed: " + ", ".join(failed)[:200],
            "systemd marks these as failed. See them on the dashboard or with systemctl --failed.",
            "No failed services anymore")
     _check_updates()
+    _check_memory_growth()
+    system.refresh_updates()
 
 
 def _check_updates():
@@ -419,8 +513,8 @@ def _announce_boot():
 
 # ---- morning summary --------------------------------------------------------------
 
-def uptime_pct(name, since):
-    rows = [r["s"].get(name) for r in store.samples(since)]
+def uptime_pct(name, since, rows=None):
+    rows = [r["s"].get(name) for r in (store.samples(since) if rows is None else rows)]
     rows = [r for r in rows if r and r != "stopped"]
     return 100 * sum(r == "up" for r in rows) / len(rows) if rows else None
 
@@ -463,12 +557,32 @@ def send_digest():
         ("Pi", f"up {_ago(snap['uptime'])} · " + (f"{snap['temp']:.0f} °C · " if snap["temp"] is not None else "") + f"disk {disk_pct:.0f}% · "
                f"memory {100 - 100 * snap['mem']['available'] / snap['mem']['total']:.0f}% used", False),
         ("Last 24 h", f"{len(incidents)} problem{'s' if len(incidents) != 1 else ''} · "
-                      f"{_updates_since(since)} packages updated" +
+                      f"{_updates_since(since)} packages updated" + _pending_text(snap) +
                       (" · restart pending" if snap["reboot_required"] else ""), False),
     ]
+    jobs = [scheduled.status(j) for j in scheduled.jobs_list()]
+    if jobs:
+        fields.append(("Scheduled jobs", "\n".join(f"• **{j['name']}**: " + _job_text(j) for j in jobs), False))
     if incidents:
         fields.append(("Problems", "\n".join(f"• {e['title']}" for e in incidents[:8]), False))
     alert("digest", "Good morning, here's your Pi", "\n".join(rows) or "No services registered.", fields=fields)
+
+
+def _pending_text(snap):
+    u = snap.get("updates")
+    if not u or not u["count"]:
+        return ""
+    return f" · {u['count']} update{'s' if u['count'] != 1 else ''} waiting" + (f" ({u['security']} security)" if u["security"] else "")
+
+
+def _job_text(j):
+    last = j["last"]
+    if j["state"] in ("failed", "late", "off", "missing"):
+        word = {"failed": "last run failed", "late": "didn't run on time", "off": "timer is off", "missing": "timer not found"}
+        return word[j["state"]]
+    if not last:
+        return "hasn't run yet"
+    return f"ran {_ago(time.time() - last['t'])} ago"
 
 
 def _digest():
@@ -488,5 +602,8 @@ def _digest():
 
 
 def start():
-    for target in (_docker_events, _journal, _sampler, _health, _announce_boot, _digest, _update_loop):
+    targets = [_docker_events, _journal, _sampler, _health, _announce_boot, _digest, _update_loop, _jobs_loop]
+    if config.HEARTBEAT_URL:
+        targets.append(_heartbeat)
+    for target in targets:
         threading.Thread(target=target, name=target.__name__.strip("_"), daemon=True).start()

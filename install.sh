@@ -19,11 +19,12 @@ if ! sudo test -f "$CONF"; then
   if [ -t 0 ]; then
     printf 'Discord webhook URL (hidden; Enter to skip): '; read -rs WEBHOOK; echo
     printf 'Your Discord user ID for pings (Enter to skip): '; read -r PING
-    WEBHOOK="$WEBHOOK" PING="$PING" CONF="$CONF" python3 - <<'PY'
+    printf 'Heartbeat URL, e.g. from healthchecks.io, to hear when the Pi goes offline (Enter to skip): '; read -r HEARTBEAT
+    WEBHOOK="$WEBHOOK" PING="$PING" HEARTBEAT="$HEARTBEAT" CONF="$CONF" python3 - <<'PY'
 import json, os, re
 path = os.environ["CONF"]
 text = open(path).read()
-for key, env in (("webhook_url", "WEBHOOK"), ("ping_user_id", "PING")):
+for key, env in (("webhook_url", "WEBHOOK"), ("ping_user_id", "PING"), ("url", "HEARTBEAT")):
     if os.environ[env].strip():
         text = re.sub(rf'^{key} = ""', f"{key} = {json.dumps(os.environ[env].strip())}", text, count=1, flags=re.M)
 open(path, "w").write(text)
