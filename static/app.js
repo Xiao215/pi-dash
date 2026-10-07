@@ -10,6 +10,8 @@ const LEVEL_ICON = { error: "x-circle", warn: "alert", ok: "check", boot: "resta
 const ALERT_LEVELS = new Set(["error", "warn", "ok", "boot", "update"]);
 const RUNNING = new Set(["up", "unhealthy", "starting"]);
 
+// The version of pi-dash this page came with; when the server reports another, pi-dash was updated.
+const PAGE_VERSION = new URL(document.currentScript.src).searchParams.get("v");
 let last = null;
 let lastOk = 0;
 let feedFilter = localGet("feedFilter") || "problems";
@@ -662,6 +664,10 @@ function setOffline(off) {
 // ---- refresh loop ---------------------------------------------------------------------
 
 function render(data) {
+  if (PAGE_VERSION && data.version && data.version !== PAGE_VERSION && !$("#drawer").classList.contains("open") && !$("#confirm").open) {
+    location.reload();  // load the new page; waits while logs or a dialog are open
+    return;
+  }
   const firstRender = !last;
   last = data;
   $("#host").textContent = data.hostname;

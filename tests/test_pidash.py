@@ -476,6 +476,22 @@ class HttpWithPassword(unittest.TestCase):
             urllib.request.urlopen(req, timeout=10)
         self.assertEqual(e.exception.code, 403)
 
+    def test_page_links_carry_the_version(self):
+        code, html, _ = self.request("/", relayed=False)
+        v = web.static_version()
+        self.assertRegex(v, r"^[0-9a-f]{12}$")
+        self.assertIn(f'/static/app.js?v={v}"', html)
+        self.assertIn(f'/static/app.css?v={v}"', html)
+        self.assertEqual(self.request("/static/app.js?v=" + v)[0], 200)
+
+    def test_version_follows_the_files(self):
+        with tempfile.TemporaryDirectory() as d, unittest.mock.patch.object(web, "STATIC", Path(d)):
+            (Path(d) / "app.js").write_text("one")
+            first = web.static_version()
+            self.assertEqual(web.static_version(), first)
+            (Path(d) / "app.js").write_text("two!")
+            self.assertNotEqual(web.static_version(), first)
+
     def test_curl_on_the_server_itself_needs_no_password(self):
         self.assertEqual(self.request("/api/jobs/1", relayed=False)[0], 404)
 

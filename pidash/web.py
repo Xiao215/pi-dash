@@ -1,5 +1,6 @@
 """The dashboard: a JSON API plus one static page. Reachable over Tailscale (ufw keeps the LAN out)."""
 
+import hashlib
 import ipaddress
 import json
 from http.cookies import CookieError, SimpleCookie
@@ -16,6 +17,22 @@ from . import auth, config, notify, scheduled, services, store, system, watch
 
 log = logging.getLogger(__name__)
 STATIC = Path(__file__).resolve().parent.parent / "static"
+
+
+_version = {"key": None, "value": ""}
+
+
+def static_version() -> str:
+    """A short hash of the page's files. The page puts it on its own CSS/JS links and reloads itself when
+    /api/state reports a different one, so a tab left open picks up an update of pi-dash."""
+    files = sorted(p for p in STATIC.iterdir() if p.is_file())
+    key = tuple((p.name, p.stat().st_mtime_ns, p.stat().st_size) for p in files)
+    if key != _version["key"]:
+        h = hashlib.sha256()
+        for p in files:
+            h.update(p.name.encode() + b"\0" + p.read_bytes())
+        _version.update(key=key, value=h.hexdigest()[:12])
+    return _version["value"]
 
 
 def _host_allowed(host: str) -> bool:
@@ -68,7 +85,7 @@ def state():
     heartbeat = {**watch.heartbeat, "every": config.HEARTBEAT_EVERY} if config.HEARTBEAT_URL else None
     return {"now": now, "hostname": config.HOSTNAME, "pi": system.snapshot(), "services": svcs,
             "jobs": [scheduled.status(j, now) for j in scheduled.jobs_list()],
-            "events": store.events(80), "history": _history(now), "heartbeat": heartbeat,
+            "events": store.events(80), "history": _history(now), "heartbeat": heartbeat, "version": static_version(),
             "muted_until": store.load_state().get("muted_until", 0), "auth": bool(config.PASSWORD_HASH)}
 
 
@@ -207,10 +224,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._file(STATIC / parts[1])
             if not self._authed():
                 if not parts:
-                    return self._file(STATIC / "login.html")
+                    return self._page("login.html")
                 return self._json({"error": "sign in first"}, 401)
             if not parts:
-                return self._file(STATIC / "index.html")
+                return self._page("index.html")
             if parts == ["api", "state"]:
                 return self._json(state())
             if parts[:2] == ["api", "jobs"] and len(parts) == 3:
@@ -319,6 +336,19 @@ class Handler(BaseHTTPRequestHandler):
     def _text_body(self, limit=65536) -> str:
         n = int(self.headers.get("Content-Length") or 0)
         return self.rfile.read(min(n, limit)).decode("utf-8", "replace") if n > 0 else ""
+
+    def _page(self, name):
+        """An HTML page, with the current version on its CSS and JS links so browsers never mix old and new."""
+        v = static_version()
+        html = (STATIC / name).read_text().replace('/static/app.css"', f'/static/app.css?v={v}"') \
+            .replace('/static/app.js"', f'/static/app.js?v={v}"')
+        data = html.encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
     def _file(self, path: Path):
         path = path.resolve()
