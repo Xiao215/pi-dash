@@ -98,14 +98,14 @@ function buildStats() {
       <div class="stat-value"><span class="skel">00%</span></div>
       <div class="stat-sub"><span class="skel">loading</span></div>
       ${s.spark
-        ? `<svg class="spark" viewBox="0 0 100 34" preserveAspectRatio="none"><path class="area" d=""/><path class="line" d=""/></svg><div class="spark-axis"><span>6 h ago</span><span>now</span></div>`
+        ? `<svg class="spark" viewBox="0 0 100 34" preserveAspectRatio="none" role="img" aria-label="${s.label}, last 6 hours"><title>Last 6 hours</title><path class="area" d=""/><path class="line" d=""/></svg>`
         : `<div class="meter"><i></i></div><div class="meter-legend"><span class="used"></span><span class="free"></span></div>`}
     </div>`).join("");
-  $("#info").innerHTML = ["uptime:clock:Uptime", "power:zap:Power", "network:wifi:Network", "remote:shield:Remote access",
-    "updates:package:OS updates", "watchdog:heart:Outside watchdog"].map((x) => {
-    const [key, ic, label] = x.split(":");
-    return `<div class="info-cell" id="info-${key}">${icon(ic)}<div><div class="info-label">${label}</div><div class="info-value"><span class="skel">loading…</span></div></div></div>`;
-  }).join("");
+  // key, icon, label, and a shorter label for phones ("" when the icon and value say it)
+  $("#info").innerHTML = [["uptime", "clock", "Uptime", "Up"], ["power", "zap", "Power", "Power"], ["network", "wifi", "Network", ""],
+    ["remote", "shield", "Remote access", ""], ["updates", "package", "OS updates", "Updates"], ["watchdog", "heart", "Outside watchdog", "Watchdog"]]
+    .map(([key, ic, label, short]) => `<div class="info-cell" id="info-${key}" tabindex="0">${icon(ic)}<span class="info-label" data-short="${short}">${label}</span><span class="info-value"><span class="skel">loading…</span></span></div>`)
+    .join("");
 }
 
 function sparkPaths(series, [lo, hi]) {
@@ -146,7 +146,7 @@ function setInfo(key, value, level = "", title = "") {
   const el = $(`#info-${key}`);
   cls(el, `info-cell ${level}`);
   put($(".info-value", el), value);
-  el.title = title;
+  el.title = `${$(".info-label", el).textContent}: ${title || el.textContent}`;
 }
 
 function renderPi(data) {
@@ -230,6 +230,8 @@ function renderJobs(data) {
   const jobs = data.jobs || [];
   $("#jobs-section").hidden = !jobs.length;
   if (!jobs.length) return;
+  const bad = jobs.filter((j) => ["failed", "late", "off", "missing"].includes(j.state)).length;
+  put($("#jobs-count"), bad ? `${bad} need${bad > 1 ? "" : "s"} attention` : `${jobs.length} on schedule`);
   put($("#jobs"), jobs.map((j) => {
     const [label, tone] = JOB_STATE[j.state] || [j.state, ""];
     const r = j.last;
@@ -346,6 +348,14 @@ function lineChart(el, opts) {
     if (opts.area) svg += `<path class="area ${s.cls}" d="${area}"/>`;
     svg += `<path class="line ${s.cls}" d="${line}"/>`;
   }
+  const firstData = Math.min(...opts.series.map((s) => { const i = s.data.findIndex((v) => v != null); return i < 0 ? n : i; }));
+  if (firstData >= n) {
+    svg += `<text class="nodata" x="${f(L + PW / 2)}" y="${f(T + PH / 2)}">No data yet</text>`;
+  } else if (firstData / n > 0.15) {  // recording started partway through the range
+    const x0 = x(opts.since + firstData * opts.step);
+    svg += `<rect class="unrecorded" x="${L}" y="${T}" width="${f(x0 - L)}" height="${PH}"/>`;
+    if (x0 - L > 90) svg += `<text class="nodata" x="${f((L + x0) / 2)}" y="${f(T + PH / 2)}">Not recorded</text>`;
+  }
   svg += `<line class="cross" x1="0" x2="0" y1="${T}" y2="${T + PH}" visibility="hidden"/>`;
   svg += opts.series.map((s) => `<circle class="pt ${s.cls}" r="4" visibility="hidden"/>`).join("");
   el.innerHTML = `<div class="chart-plot"><svg class="plot" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" tabindex="0" role="img" aria-label="${esc(opts.label || "")}">${svg}</svg><div class="tip" hidden></div></div>`;
@@ -416,41 +426,53 @@ function buildCard(name) {
   el.innerHTML = `
     <div class="svc-top">
       <div class="svc-main">
-        <div class="svc-title"><span class="dot"></span><h3><a class="svc-link"></a></h3><span class="badge"></span><span class="state-text"></span></div>
+        <div class="svc-title"><span class="dot"></span><h3><a class="svc-link"></a></h3><span class="state-text"></span><span class="badge"></span></div>
         <p class="svc-desc"></p>
-        <p class="problem" hidden></p>
-        <div class="facts"></div>
       </div>
       <div class="actions"></div>
+    </div>
+    <p class="problem" hidden></p>
+    <div class="facts"></div>
+    <div class="uptime">
+      <div class="timeline"><div class="track"></div><div class="ticks"></div></div>
+      <div class="uptime-pct"></div>
     </div>
     <div class="source-row">
       <div class="git"></div>
       <label class="auto" title="Checks every 5 minutes and updates by itself when there's something new"><input type="checkbox"><span class="switch"></span>Auto-update</label>
-    </div>
-    <div class="uptime">
-      <div class="timeline"><div class="track"></div><div class="ticks"></div></div>
-      <div class="uptime-pct"></div>
     </div>`;
   return el;
 }
 
+const WORKING = { start: "Starting…", stop: "Stopping…", restart: "Restarting…", update: "Updating…" };
+
+/** The buttons you need right now (Open, Logs, and Start or Update when they matter); the rest in a ⋯ menu. */
 function actionButtons(s) {
   const working = busy.get(s.name) || s.busy;
   const running = RUNNING.has(s.state);
-  const b = (action, label, ic, extra = "", count = "") => {
-    const spinning = working === action;
-    return `<button class="btn ${extra}" data-svc="${esc(s.name)}" data-action="${action}" ${working ? "disabled" : ""}>${spinning ? '<span class="spin"></span>' : icon(ic)}<span>${label}</span>${count}</button>`;
-  };
   const behind = s.source?.behind || 0;
+  const name = esc(s.name);
+  const b = (action, label, ic, extra = "", count = "") =>
+    `<button class="btn ${extra}" data-svc="${name}" data-action="${action}" ${working ? "disabled" : ""}>${icon(ic)}<span>${label}</span>${count}</button>`;
+  const item = (action, label, ic, extra = "") =>
+    `<button role="menuitem" class="${extra}" data-svc="${name}" data-action="${action}">${icon(ic)}${label}</button>`;
   let host = "";
   try { host = s.url ? new URL(s.url).host : ""; } catch { /* not a full URL: the button still works */ }
-  return [
-    s.url ? `<a class="btn open" href="${esc(s.url)}" target="_blank" rel="noopener" title="${esc(host || s.url)}">${icon("external")}<span>Open</span></a>` : "",
-    b("logs", "Logs", "logs", "quiet"),
-    running ? b("restart", "Restart", "restart") : "",
-    running ? b("stop", "Stop", "stop", "danger-text") : b("start", "Start", "play"),
-    s.can_update ? b("update", "Update", "update", behind ? "accent" : "", behind ? `<span class="count">${behind}</span>` : "") : "",
+  const shown = [];
+  if (working) shown.push(`<span class="working" role="status"><span class="spin small"></span>${WORKING[working] || "Working…"}</span>`);
+  else if (!running) shown.push(b("start", "Start", "play", "accent"));
+  else if (s.can_update && behind) shown.push(b("update", "Update", "update", "accent", `<span class="count">${behind}</span>`));
+  if (s.url) shown.push(`<a class="btn" href="${esc(s.url)}" target="_blank" rel="noopener" title="Open ${esc(host || s.url)}">${icon("external")}<span>Open</span></a>`);
+  shown.push(b("logs", "Logs", "logs"));
+  const menu = [
+    running ? item("restart", "Restart", "restart") : "",
+    s.can_update && !(running && behind) ? item("update", "Update now", "update") : "",  // else it's a button already
+    running ? `<hr>${item("stop", "Stop", "stop", "danger")}` : "",
   ].join("");
+  if (menu && !working) {
+    shown.push(`<div class="menu-wrap"><button class="btn icon" data-menu aria-haspopup="menu" aria-expanded="false" aria-label="More actions for ${name}" title="More">${icon("more")}</button><div class="menu" role="menu">${menu}</div></div>`);
+  }
+  return shown.join("");
 }
 
 function renderServices(data) {
@@ -461,12 +483,16 @@ function renderServices(data) {
     return;
   }
   if (box.querySelector(".empty, .skel-card")) box.innerHTML = "";
+  const up = data.services.filter((s) => s.state === "up").length, total = data.services.length;
+  put($("#svc-count"), up === total ? `${total} running` : `${up} of ${total} running`);
   const seen = new Set();
   data.services.forEach((s, i) => {
     seen.add(s.name);
     let el = cards.get(s.name);
     if (!el) { el = buildCard(s.name); el.style.animationDelay = `${i * 60}ms`; cards.set(s.name, el); box.append(el); }
-    cls(el, `svc ${s.state}${el.classList.contains("appear") ? " appear" : ""}`);
+    const foot = !!(s.source || s.can_update);
+    cls(el, `svc ${s.state}${foot ? "" : " no-foot"}${el.classList.contains("appear") ? " appear" : ""}`);
+    $(".source-row", el).hidden = !foot;
     cls($(".dot", el), `dot ${s.state}`);
     const link = $(".svc-link", el);
     put(link, esc(s.name) + icon("chevron"));
@@ -484,11 +510,11 @@ function renderServices(data) {
 
     const running = RUNNING.has(s.state);
     const facts = [
-      s.since && `<span>${running ? "Up for" : "Stopped"} <b>${running ? dur(data.now - s.since) : ago(s.since, data.now)}</b></span>`,
+      s.since && `<span>${running ? "Up" : "Stopped"} <b>${running ? dur(data.now - s.since) : ago(s.since, data.now)}</b></span>`,
       running && s.cpu != null && `<span>CPU <b>${s.cpu.toFixed(1)}%</b></span>`,
       running && s.mem != null && `<span>Memory <b>${mb(s.mem)}</b></span>`,
-      `<span>Restarts <b>${s.restarts ?? 0}</b></span>`,
-      s.health && `<span>Health check <b>${s.health.ok ? `${s.health.ms} ms` : "failing"}</b></span>`,
+      s.health && `<span>Health <b class="${s.health.ok ? "" : "bad-text"}">${s.health.ok ? `${s.health.ms} ms` : "failing"}</b></span>`,
+      s.restarts ? `<span>Restarts <b>${s.restarts}</b></span>` : "",
       !running && s.exit_code ? `<span>Exit code <b>${s.exit_code}</b></span>` : "",
     ].filter(Boolean).join("");
     put($(".facts", el), facts);
@@ -504,7 +530,6 @@ function renderServices(data) {
     }
     if (g?.dirty) line += `<span class="new warn-text">· local changes</span>`;
     if (g?.check_failed) line += `<span class="new warn-text">· couldn't check for updates</span>`;
-    if (s.busy === "update") line += `<span class="new"><span class="spin small"></span>updating…</span>`;
     put($(".git", el), line);
     const auto = $(".auto", el);
     auto.hidden = !s.can_update;
@@ -530,7 +555,7 @@ function drawTimeline(el, segs, since, now, ticks) {
     const label = `${when(a)}–${hm(b)} · ${STATE_LABEL[st] || st} (${len})`;
     return `<i class="${st}" style="left:${pos(a).toFixed(3)}%;width:${(pos(b) - pos(a)).toFixed(3)}%" title="${label}"></i>`;
   }).join(""));
-  put($(".ticks", el), ticks.filter(([t]) => t < now - span * 0.1)  // none crowding "now"
+  put($(".ticks", el), ticks.filter(([t]) => t > since + span * 0.04 && t < now - span * 0.1)  // none past the start, none crowding "now"
     .map(([t, label]) => `<span style="left:${pos(t).toFixed(2)}%">${esc(label)}</span>`).join("") + `<span class="now">now</span>`);
 }
 
@@ -550,6 +575,17 @@ function renderFeed(events, now) {
 }
 
 /** Newest first; new rows slide in, expanded rows stay open across refreshes. */
+function dayLabel(t, now) {
+  const d = new Date(t * 1000), today = new Date(now * 1000), yesterday = new Date(now * 1000);
+  yesterday.setDate(today.getDate() - 1);
+  if (d.toDateString() === today.toDateString()) return "Today";
+  if (d.toDateString() === yesterday.toDateString()) return "Yesterday";
+  return d.toLocaleDateString([], { weekday: "long", month: "short", day: "numeric" });
+}
+/** Within the last hour "12 min ago"; otherwise the time of day (the day is in the group heading). */
+const whenText = (t, now) => (now - t < 3600 ? ago(t, now) : hm(t));
+
+/** Newest first, grouped by day; new rows slide in, expanded rows stay open across refreshes. */
 function renderEvents(list, shown, now, emptyText) {
   const first = !list._rendered;
   if (!shown.length) {
@@ -562,7 +598,23 @@ function renderEvents(list, shown, now, emptyText) {
   const existing = new Map([...list.children].map((li) => [li.dataset.key, li]));
   const keep = new Set();
   let prev = null;
+  const place = (li) => {
+    if (prev ? prev.nextElementSibling !== li : list.firstElementChild !== li) prev ? prev.after(li) : list.prepend(li);
+    prev = li;
+  };
+  let lastDay = null;
   for (const e of shown) {
+    const day = new Date(e.t * 1000).toDateString();
+    if (day !== lastDay) {
+      lastDay = day;
+      const dkey = `day:${day}`;
+      keep.add(dkey);
+      let dli = existing.get(dkey);
+      if (!dli) { dli = document.createElement("li"); dli.className = "day"; dli.dataset.key = dkey; }
+      const label = dayLabel(e.t, now);
+      if (dli.textContent !== label) dli.textContent = label;
+      place(dli);
+    }
     const key = `${e.t}`;
     keep.add(key);
     let li = existing.get(key);
@@ -573,21 +625,19 @@ function renderEvents(list, shown, now, emptyText) {
       if (!first && e.t > (list._newest || 0)) li.classList.add("enter");
       const tag = expandable ? "button" : "div";
       li.innerHTML = `
-        <${tag} class="ev" ${expandable ? `aria-expanded="false"` : ""}>
+        <${tag} class="ev${e.detail ? " has-detail" : ""}" ${expandable ? `aria-expanded="false"` : ""}>
           <span class="ev-ico ${e.level}">${icon(LEVEL_ICON[e.level] || "info")}</span>
-          <span><span class="ev-title">${esc(e.title)}${e.service ? `<span class="chip">${esc(e.service)}</span>` : ""}</span>${e.detail ? `<span class="ev-detail" style="display:block">${esc(expandable && !(e.log && e.log.length) ? e.detail.slice(0, 140) + "…" : e.detail)}</span>` : ""}</span>
+          <span class="ev-body"><span class="ev-title">${esc(e.title)}${e.service ? `<span class="chip">${esc(e.service)}</span>` : ""}</span>${e.detail ? `<span class="ev-detail">${esc(expandable && !(e.log && e.log.length) ? e.detail.slice(0, 140) + "…" : e.detail)}</span>` : ""}</span>
           <span class="ev-when"><span class="t"></span>${expandable ? icon("chevron") : ""}</span>
         </${tag}>
         ${expandable ? `<div class="ev-log"><div><pre>${esc(e.log && e.log.length ? e.log.join("\n") : e.detail)}</pre></div></div>` : ""}`;
       if (openEvents.has(key)) li.classList.add("open");
     }
     const t = $(".ev-when .t", li);
-    t.textContent = ago(e.t, now);
+    const text = whenText(e.t, now);
+    if (t.textContent !== text) t.textContent = text;
     t.title = new Date(e.t * 1000).toLocaleString();
-    if (prev ? prev.nextElementSibling !== li : list.firstElementChild !== li) {
-      prev ? prev.after(li) : list.prepend(li);
-    }
-    prev = li;
+    place(li);
   }
   for (const [key, li] of existing) if (!keep.has(key)) li.remove();
   list._newest = Math.max(list._newest || 0, ...shown.map((e) => e.t));
@@ -902,7 +952,9 @@ async function act(name, action) {
 
 document.addEventListener("click", (e) => {
   const b = e.target.closest("button[data-action]");
-  if (b) act(b.dataset.svc, b.dataset.action);
+  if (!b) return;
+  closeMenus();
+  act(b.dataset.svc, b.dataset.action);
 });
 
 document.addEventListener("change", async (e) => {
@@ -934,7 +986,18 @@ for (const [btnId, menuId] of [["#mute-btn", "#mute-menu"], ["#more-btn", "#more
     if (open) m.querySelector("button:not([hidden])")?.focus();
   });
 }
-document.addEventListener("click", (e) => { if (!e.target.closest(".menu")) closeMenus(); });
+document.addEventListener("click", (e) => {
+  const opener = e.target.closest("button[data-menu]");
+  if (opener) {
+    const m = opener.nextElementSibling;
+    closeMenus(m);
+    const open = m.classList.toggle("open");
+    opener.setAttribute("aria-expanded", open);
+    if (open) m.querySelector("button")?.focus({ preventScroll: true });
+    return;
+  }
+  if (!e.target.closest(".menu")) closeMenus();
+});
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   if ($(".menu.open")) closeMenus();
@@ -1081,7 +1144,7 @@ function renderPage(data) {
 }
 
 function tile(label, value, sub, level = "") {
-  return `<div class="stat ${level}"><div class="stat-head"><span>${label}</span></div><div class="stat-value">${value}</div><div class="stat-sub">${sub}</div></div>`;
+  return `<div class="stat ${level}"><div class="stat-head"><span>${label}</span></div><div class="stat-value">${value}</div><div class="stat-sub" title="${esc(sub)}">${sub}</div></div>`;
 }
 
 function renderTiles(s, now) {
@@ -1095,14 +1158,14 @@ function renderTiles(s, now) {
   const cpuAvg = avg(h?.cpu), msAvg = avg(h?.ms);
   const tiles = [
     tile("Uptime", upText, inc, up != null && up < 99 ? "warn" : ""),
-    tile("CPU", running && s.cpu != null ? `${s.cpu.toFixed(1)}<small>%</small>` : "—",
-      h && peak.cpu != null ? `avg ${cpuAvg.toFixed(1)}% · peak ${peak.cpu.toFixed(1)}%` : "of the whole Pi"),
-    tile("Memory", running && s.mem != null ? `${mb(s.mem).replace(/ (MB|GB)$/, "<small> $1</small>")}` : "—",
-      h && peak.mem != null ? `peak ${mbText(peak.mem)} · ${rl}` : ""),
+    tile("CPU now", running && s.cpu != null ? `${s.cpu.toFixed(1)}<small>%</small>` : "—",
+      h && peak.cpu != null ? `average ${cpuAvg.toFixed(1)}% · busiest minute ${peak.cpu.toFixed(0)}%` : "of the whole Pi"),
+    tile("Memory now", running && s.mem != null ? `${mb(s.mem).replace(/ (MB|GB)$/, "<small> $1</small>")}` : "—",
+      h && peak.mem != null ? `highest ${mbText(peak.mem)} · ${rl}` : ""),
   ];
   if (s.health || h?.config?.health) {
     tiles.push(tile("Health check", s.health ? (s.health.ok ? `${s.health.ms}<small> ms</small>` : "Failing") : "—",
-      msAvg != null ? `avg ${Math.round(msAvg)} ms · peak ${Math.round(peak.ms)} ms` : "response time", s.health && !s.health.ok ? "bad" : ""));
+      msAvg != null ? `average ${Math.round(msAvg)} ms · slowest ${Math.round(peak.ms)} ms` : "response time", s.health && !s.health.ok ? "bad" : ""));
   }
   put($("#sp-tiles"), tiles.join(""));
 }
@@ -1164,7 +1227,7 @@ function renderHistory() {
 
 /** A click anywhere on a card that isn't a control opens the service's page. */
 $("#services").addEventListener("click", (e) => {
-  if (e.target.closest("a, button, label, input") || String(window.getSelection())) return;
+  if (e.target.closest("a, button, label, input, .menu") || String(window.getSelection())) return;
   const card = e.target.closest(".svc[data-name]");
   if (card) location.hash = `service/${encodeURIComponent(card.dataset.name)}`;
 });

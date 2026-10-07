@@ -90,26 +90,27 @@
   <div class="banner" id="banner" hidden></div>
 
   <main id="home">
-    <section aria-label="The Pi">
+    <section aria-label="The Pi" class="pi-section">
       <div class="stats" id="stats"></div>
-      <div class="netcard" id="netcard">
-        <div class="netcard-head">
-          <div class="stat-head"><svg class="i"><use href="#i-net"/></svg><span>Network</span></div>
-          <div class="net-now" id="net-now"><span class="skel">loading</span></div>
-        </div>
-        <div class="chart" id="net-chart"></div>
-      </div>
       <div class="info" id="info"></div>
     </section>
 
     <section>
-      <div class="section-head"><h2>Services</h2></div>
+      <div class="section-head"><h2>Services <span class="count" id="svc-count"></span></h2></div>
       <div id="services" class="services"></div>
     </section>
 
     <section id="jobs-section" hidden>
-      <div class="section-head"><h2>Scheduled jobs</h2></div>
+      <div class="section-head"><h2>Scheduled jobs <span class="count" id="jobs-count"></span></h2></div>
       <ol class="jobs" id="jobs"></ol>
+    </section>
+
+    <section>
+      <div class="section-head"><h2>Network <span class="count">last 6 h</span></h2></div>
+      <div class="netcard" id="netcard">
+        <div class="net-now" id="net-now"><span class="skel">loading</span></div>
+        <div class="chart" id="net-chart"></div>
+      </div>
     </section>
 
     <section>
@@ -128,7 +129,7 @@
     <a class="back" href="#"><svg class="i"><use href="#i-back"/></svg>All services</a>
     <section class="page-head">
       <div class="svc-main">
-        <div class="svc-title"><span class="dot"></span><h2 class="page-title" id="sp-name"></h2><span class="badge" id="sp-kind"></span><span class="state-text" id="sp-state"></span></div>
+        <div class="svc-title"><span class="dot"></span><h2 class="page-title" id="sp-name"></h2><span class="state-text" id="sp-state"></span><span class="badge" id="sp-kind"></span></div>
         <p class="svc-desc" id="sp-desc"></p>
         <p class="problem" id="sp-problem" hidden></p>
         <div class="facts" id="sp-facts"></div>
