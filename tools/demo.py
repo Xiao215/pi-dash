@@ -116,6 +116,7 @@ def state(trouble):
         {
             "name": "music-server", "kind": "compose", "description": "Streams the music library; public behind Tailscale Funnel",
             "url": "https://example.com", "state": "up", "raw": "running", "since": now - 9 * 3600,
+            "dir": "~/services/music-server", "log_driver": "json-file" if trouble else "journald",
             "cpu": 2.4, "mem": 262 * 1024 ** 2, "restarts": 0, "health": {"ok": True, "ms": 3, "error": ""},
             "source": {"kind": "image", "image": "ghcr.io/you/music-server:latest", "sha": "865767f",
                        "time": now - 9 * 3600 - 600, "behind": 0, "dirty": False},

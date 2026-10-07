@@ -92,6 +92,7 @@ def _compose_status(svc):
         "exit_code": st.get("ExitCode"), "oom": st.get("OOMKilled"),
         "restarts": info.get("RestartCount", 0), "pid": st.get("Pid"),
         "mem": mem, "cpu": cpu, "image": info.get("Config", {}).get("Image"),
+        "log_driver": (info.get("HostConfig", {}).get("LogConfig") or {}).get("Type"),  # pi-dash reads journald only
     }
 
 
@@ -139,7 +140,7 @@ def status(svc) -> dict:
         state = "stopped"
     else:
         state = "down"
-    return {"name": svc.name, "kind": svc.kind, "description": svc.description, "url": svc.url,
+    return {"name": svc.name, "kind": svc.kind, "description": svc.description, "url": svc.url, "dir": svc.dir,
             "state": state, "health": h, "can_update": bool(svc.update), "source": source.get(svc.name),
             "busy": running_job(svc), "auto_update": auto_update_on(svc),
             "problem": problem if state == "unhealthy" else "", **s}

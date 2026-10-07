@@ -782,6 +782,19 @@ function showLogs(name, url = `/api/services/${encodeURIComponent(name)}/logs`) 
   setTimeout(() => { if (log.querySelector(".placeholder")) log.innerHTML = `<div class="placeholder">No log lines yet.</div>`; }, 2500);
 }
 
+/** A container that logs somewhere pi-dash can't read: say why there's nothing, and how to fix it. */
+function showLogDriverHelp(s) {
+  openDrawer(s.name);
+  $("#log-tools").hidden = true;
+  drawerStatus(`Logs go to Docker's ${s.log_driver} driver, not the system journal`, "off");
+  log.innerHTML = `<div class="placeholder help">
+    <p><b>pi-dash can't see ${esc(s.name)}'s logs.</b> Its container writes them with Docker's <code>${esc(s.log_driver)}</code> log driver,
+    and pi-dash reads the system journal. So there's nothing here, no alerts about errors in its log, and crash alerts come without log lines.</p>
+    <p>To fix it, remove the <code>logging:</code> section from its compose file (or set <code>driver: journald</code>), then recreate the container:</p>
+    <pre>cd ${esc(s.dir || "<its folder>")} && docker compose up -d</pre>
+    <p>Until then: <code>docker logs -f ${esc(s.name)}</code> on the Pi.</p></div>`;
+}
+
 /** What a scheduled job sent along with its last ping. */
 async function showOutput(name) {
   openDrawer(name);
@@ -859,7 +872,10 @@ const CONFIRM = {
 };
 
 async function act(name, action) {
-  if (action === "logs") return showLogs(name);
+  if (action === "logs") {
+    const s = last?.services.find((x) => x.name === name);
+    return s?.log_driver && s.log_driver !== "journald" ? showLogDriverHelp(s) : showLogs(name);
+  }
   const svc = last?.services.find((s) => s.name === name);
   if (CONFIRM[action] && !(await confirmBox(...CONFIRM[action](name, svc)))) return;
   busy.set(name, action);
@@ -1056,6 +1072,7 @@ function renderPage(data) {
     s.pid ? `<span>PID <b>${s.pid}</b></span>` : "",
     !running && s.exit_code ? `<span>Exit code <b>${s.exit_code}</b></span>` : "",
     s.oom ? `<span class="warn-text">Last stop: out of memory</span>` : "",
+    s.log_driver && s.log_driver !== "journald" ? `<span class="warn-text">Logs not in the journal (${esc(s.log_driver)})</span>` : "",
     s.health && !s.health.ok ? `<span>Health check <b>${esc(s.health.error || "failing")}</b></span>` : "",
   ].filter(Boolean).join(""));
   put($("#sp-actions"), actionButtons(s));

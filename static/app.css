@@ -411,6 +411,9 @@ li.open .ev-log { grid-template-rows: 1fr; }
 .log .end { padding: 12px 16px 0; font: 600 13px system-ui, sans-serif; display: flex; align-items: center; gap: 8px; }
 .log .end.ok { color: var(--up); } .log .end.bad { color: var(--down); }
 .log .placeholder { padding: 24px 16px; color: var(--muted); font-family: system-ui, sans-serif; }
+.log .placeholder.help { display: grid; gap: 12px; max-width: 640px; color: var(--text); font-size: 14px; line-height: 1.5; }
+.log .placeholder.help code { font: 12.5px var(--mono); background: var(--surface-2); padding: 1px 5px; border-radius: 5px; border: 1px solid var(--border); }
+.log .placeholder.help pre { margin: 0; font: 12.5px/1.5 var(--mono); background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; white-space: pre-wrap; word-break: break-all; }
 .jump { position: absolute; bottom: 18px; left: 50%; transform: translateX(-50%); box-shadow: var(--shadow-lg); animation: rise .2s var(--ease); }
 .scrim { position: fixed; inset: 0; background: rgb(0 0 0 / .28); opacity: 0; pointer-events: none; transition: opacity .3s var(--ease); z-index: 15; }
 .scrim.open { opacity: 1; pointer-events: auto; }
