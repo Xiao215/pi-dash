@@ -133,8 +133,9 @@ def state(trouble):
         },
     ]
     events = [
-        {"t": now - 1500, "level": "update", "title": "music-server updated", "service": "music-server",
-         "detail": "Now running the image published 25 min ago."},
+        *({"t": now - m * 60, "level": "update", "title": "music-server updated", "service": "music-server",
+           "detail": f"Now running the image published {p} min ago.\nFreed {f} MB of old images."}
+          for m, p, f in ((25, 1, 9), (31, 4, 9), (38, 3, 9), (52, 8, 746))),
         {"t": now - 3 * 3600, "level": "ok", "title": "discord-bot is back up", "service": "discord-bot", "detail": ""},
         {"t": now - 3 * 3600 - 120, "level": "error", "title": "discord-bot crashed", "service": "discord-bot",
          "detail": "Exited with code 1. It restarts automatically.",

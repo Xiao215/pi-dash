@@ -585,7 +585,95 @@ function dayLabel(t, now) {
 /** Within the last hour "12 min ago"; otherwise the time of day (the day is in the group heading). */
 const whenText = (t, now) => (now - t < 3600 ? ago(t, now) : hm(t));
 
-/** Newest first, grouped by day; new rows slide in, expanded rows stay open across refreshes. */
+/** Back-to-back events that say the same thing on the same day, e.g. one service updating again and again. */
+function foldRepeats(shown) {
+  const runs = [];
+  for (const e of shown) {
+    const run = runs[runs.length - 1], a = run?.[0];
+    if (a && a.level === e.level && a.title === e.title && a.service === e.service
+        && new Date(a.t * 1000).toDateString() === new Date(e.t * 1000).toDateString()) run.push(e);
+    else runs.push([e]);
+  }
+  return runs;
+}
+
+/** Puts each row after the previous one, moving it only when it's out of place (so open rows don't jump). */
+function placer(parent) {
+  let prev = null;
+  return (li) => {
+    if (prev ? prev.nextElementSibling !== li : parent.firstElementChild !== li) prev ? prev.after(li) : parent.prepend(li);
+    prev = li;
+  };
+}
+
+function setWhen(li, t, now) {
+  const el = $(":scope > .ev .ev-when .t", li);
+  const text = whenText(t, now);
+  if (el.textContent !== text) el.textContent = text;
+  el.title = new Date(t * 1000).toLocaleString();
+}
+
+/** One event. Inside a folded group the icon and title are already on the group's row, so it shows just the detail. */
+function eventRow(e, existing, now, fresh, nested = false) {
+  const key = `${e.t}`;
+  let li = existing.get(key);
+  if (!li) {
+    li = document.createElement("li");
+    li.dataset.key = key;
+    if (fresh) li.classList.add("enter");
+    const expandable = (e.log && e.log.length) || (e.detail && e.detail.length > 140);
+    const tag = expandable ? "button" : "div";
+    const detail = e.detail ? `<span class="ev-detail">${esc(expandable && !(e.log && e.log.length) ? e.detail.slice(0, 140) + "…" : e.detail)}</span>` : "";
+    const body = nested && e.detail ? detail : `<span class="ev-title">${esc(e.title)}${e.service && !nested ? `<span class="chip">${esc(e.service)}</span>` : ""}</span>${detail}`;
+    li.innerHTML = `
+      <${tag} class="ev${e.detail ? " has-detail" : ""}" ${expandable ? `aria-expanded="false"` : ""}>
+        ${nested ? "" : `<span class="ev-ico ${e.level}">${icon(LEVEL_ICON[e.level] || "info")}</span>`}
+        <span class="ev-body">${body}</span>
+        <span class="ev-when"><span class="t"></span>${expandable ? icon("chevron") : ""}</span>
+      </${tag}>
+      ${expandable ? `<div class="ev-log"><div><pre>${esc(e.log && e.log.length ? e.log.join("\n") : e.detail)}</pre></div></div>` : ""}`;
+    if (openEvents.has(key)) li.classList.add("open");
+  }
+  setWhen(li, e.t, now);
+  return li;
+}
+
+/** Several of the same event as one row ("selfmp3 updated · 4 times since 14:02") that opens to list them. */
+function repeatRow(run, existing, now, isFresh) {
+  const a = run[0], oldest = run[run.length - 1];
+  const key = `run:${oldest.t}`;
+  let li = existing.get(key);
+  if (!li) {
+    li = document.createElement("li");
+    li.dataset.key = key;
+    li.className = "repeats";
+    li.innerHTML = `
+      <button class="ev has-detail" aria-expanded="false">
+        <span class="ev-ico ${a.level}">${icon(LEVEL_ICON[a.level] || "info")}</span>
+        <span class="ev-body"><span class="ev-title">${esc(a.title)}${a.service ? `<span class="chip">${esc(a.service)}</span>` : ""}</span><span class="ev-detail"></span></span>
+        <span class="ev-when"><span class="t"></span>${icon("chevron")}</span>
+      </button>
+      <div class="ev-log"><div><ol class="feed-sub"></ol></div></div>`;
+    if (openEvents.has(key)) li.classList.add("open");
+  }
+  const summary = `${run.length} times since ${hm(oldest.t)}`;
+  const d = $(":scope > .ev .ev-detail", li);
+  if (d.textContent !== summary) d.textContent = summary;
+  setWhen(li, a.t, now);
+  const sub = $(".feed-sub", li);
+  const members = new Map([...sub.children].map((m) => [m.dataset.key, m]));
+  const place = placer(sub);
+  const keep = new Set();
+  for (const e of run) {
+    const m = eventRow(e, members, now, isFresh(e), true);
+    keep.add(m.dataset.key);
+    place(m);
+  }
+  for (const [k, m] of members) if (!keep.has(k)) m.remove();
+  return li;
+}
+
+/** Newest first, grouped by day, repeats folded; new rows slide in, expanded rows stay open across refreshes. */
 function renderEvents(list, shown, now, emptyText) {
   const first = !list._rendered;
   if (!shown.length) {
@@ -595,48 +683,25 @@ function renderEvents(list, shown, now, emptyText) {
   }
   list.querySelector(".none")?.remove();
   list._html = null;
+  const isFresh = (e) => !first && e.t > (list._newest || 0);
   const existing = new Map([...list.children].map((li) => [li.dataset.key, li]));
   const keep = new Set();
-  let prev = null;
-  const place = (li) => {
-    if (prev ? prev.nextElementSibling !== li : list.firstElementChild !== li) prev ? prev.after(li) : list.prepend(li);
-    prev = li;
-  };
+  const place = placer(list);
   let lastDay = null;
-  for (const e of shown) {
-    const day = new Date(e.t * 1000).toDateString();
+  for (const run of foldRepeats(shown)) {
+    const day = new Date(run[0].t * 1000).toDateString();
     if (day !== lastDay) {
       lastDay = day;
       const dkey = `day:${day}`;
       keep.add(dkey);
       let dli = existing.get(dkey);
       if (!dli) { dli = document.createElement("li"); dli.className = "day"; dli.dataset.key = dkey; }
-      const label = dayLabel(e.t, now);
+      const label = dayLabel(run[0].t, now);
       if (dli.textContent !== label) dli.textContent = label;
       place(dli);
     }
-    const key = `${e.t}`;
-    keep.add(key);
-    let li = existing.get(key);
-    const expandable = (e.log && e.log.length) || (e.detail && e.detail.length > 140);
-    if (!li) {
-      li = document.createElement("li");
-      li.dataset.key = key;
-      if (!first && e.t > (list._newest || 0)) li.classList.add("enter");
-      const tag = expandable ? "button" : "div";
-      li.innerHTML = `
-        <${tag} class="ev${e.detail ? " has-detail" : ""}" ${expandable ? `aria-expanded="false"` : ""}>
-          <span class="ev-ico ${e.level}">${icon(LEVEL_ICON[e.level] || "info")}</span>
-          <span class="ev-body"><span class="ev-title">${esc(e.title)}${e.service ? `<span class="chip">${esc(e.service)}</span>` : ""}</span>${e.detail ? `<span class="ev-detail">${esc(expandable && !(e.log && e.log.length) ? e.detail.slice(0, 140) + "…" : e.detail)}</span>` : ""}</span>
-          <span class="ev-when"><span class="t"></span>${expandable ? icon("chevron") : ""}</span>
-        </${tag}>
-        ${expandable ? `<div class="ev-log"><div><pre>${esc(e.log && e.log.length ? e.log.join("\n") : e.detail)}</pre></div></div>` : ""}`;
-      if (openEvents.has(key)) li.classList.add("open");
-    }
-    const t = $(".ev-when .t", li);
-    const text = whenText(e.t, now);
-    if (t.textContent !== text) t.textContent = text;
-    t.title = new Date(e.t * 1000).toLocaleString();
+    const li = run.length > 1 ? repeatRow(run, existing, now, isFresh) : eventRow(run[0], existing, now, isFresh(run[0]));
+    keep.add(li.dataset.key);
     place(li);
   }
   for (const [key, li] of existing) if (!keep.has(key)) li.remove();

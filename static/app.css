@@ -380,11 +380,15 @@ button.ev:hover { background: var(--surface-2); }
 .ev-detail { color: var(--muted); font-size: 13.5px; white-space: pre-line; }
 .ev-when { color: var(--muted); font-size: 12.5px; white-space: nowrap; line-height: 30px; display: flex; align-items: center; gap: 4px; font-variant-numeric: tabular-nums; }
 .ev-when .i { width: 14px; height: 14px; transition: transform .2s var(--ease); color: var(--faint); }
-li.open .ev-when .i { transform: rotate(90deg); }
+li.open > .ev .ev-when .i { transform: rotate(90deg); }
 .ev-log { display: grid; grid-template-rows: 0fr; transition: grid-template-rows .3s var(--ease); }
-li.open .ev-log { grid-template-rows: 1fr; }
+li.open > .ev-log { grid-template-rows: 1fr; }
 .ev-log > div { overflow: hidden; }
 .ev-log pre { margin: 0 16px 14px 58px; padding: 10px 12px; font: 12px/1.5 var(--mono); background: var(--bg); border: 1px solid var(--border); border-radius: 10px; overflow-x: auto; white-space: pre-wrap; word-break: break-word; max-height: 320px; }
+.feed-sub { list-style: none; padding: 0; margin: 0; border-top: 1px solid var(--border); background: color-mix(in srgb, var(--surface-2) 45%, transparent); }
+.feed-sub .ev { grid-template-columns: minmax(0, 1fr) auto; padding: 6px 16px 6px 58px; }
+.feed-sub .ev-body { min-height: 30px; align-content: center; }
+.feed-sub .ev-detail { color: var(--text); }
 .feed .none { padding: 26px; text-align: center; color: var(--muted); font-size: 14px; }
 
 /* ---- drawer ---- */
