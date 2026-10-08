@@ -80,11 +80,20 @@ def _docker_events():
             elif action == "oom":
                 _crashed(label, "Killed: it ran out of memory.", svc)
             elif action.startswith("health_status: unhealthy"):
+                if svc or label in _alerted_down:
+                    continue  # the sampler reports configured services, once they've had time to settle
                 lines = services.recent_logs(svc) if svc else []
                 alert("warn", f"{label} is unhealthy", "Its health check keeps failing.", label, log_lines=lines)
                 _alerted_down.add(label)
         p.wait()
         time.sleep(5)
+
+
+def _minutes_before_alert(state, since, now=None):
+    """Down: 2 bad samples in a row. Unhealthy just after a start (an update, a restart): 5, since many apps
+    are slow to answer while they warm up, and a version that stays broken is still reported."""
+    now = now or time.time()
+    return 5 if state == "unhealthy" and since and now - since < 600 else 2
 
 
 def _long_running(container):
@@ -223,14 +232,17 @@ def _sampler():
                              h["ms"] if h and h["ok"] else None]
             bad = st in ("down", "unhealthy") and not services.running_job(svc)  # not mid-update
             _bad_streak[svc.name] = _bad_streak.get(svc.name, 0) + 1 if bad else 0
-            if bad and _bad_streak[svc.name] == 2 and svc.name not in _alerted_down:
+            if bad and _bad_streak[svc.name] >= _minutes_before_alert(st, s.get("since")) and svc.name not in _alerted_down:
                 c = services.checks.get(svc.name)
                 h = services.health.get(svc.name) or {}
                 if st == "unhealthy" and c and not c["ok"] and h.get("ok", True):
                     alert("warn", f"{svc.name} needs attention", c["problem"], svc.name)  # running, but e.g. signed out
+                elif st == "unhealthy":
+                    why = f"It's running, but its health check is failing: {h['error']}." if h.get("error") \
+                        else "It's running, but its health check keeps failing."
+                    alert("warn", f"{svc.name} isn't responding", why, svc.name, log_lines=services.recent_logs(svc, 15))
                 else:
-                    why = "It isn't running." if st == "down" else f"Health check failing: {h.get('error') or 'no answer'}."
-                    alert("error", f"{svc.name} is down", why, svc.name, log_lines=services.recent_logs(svc, 15))
+                    alert("error", f"{svc.name} is down", "It isn't running.", svc.name, log_lines=services.recent_logs(svc, 15))
                 _alerted_down.add(svc.name)
             elif st == "up" and svc.name in _alerted_down:
                 _alerted_down.discard(svc.name)

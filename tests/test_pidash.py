@@ -323,6 +323,13 @@ raspi-firmware/stable 1:1.20250915-1 arm64 [upgradable from: 1:1.20250430-1]
         self.assertEqual(watch._ago(7300), "2 h 1 min")
         self.assertEqual(watch._ago(3 * 86400), "3 days")
 
+    def test_alert_waits_while_a_service_settles(self):
+        now = 1_000_000
+        self.assertEqual(watch._minutes_before_alert("unhealthy", now - 120, now), 5)  # just updated
+        self.assertEqual(watch._minutes_before_alert("unhealthy", now - 3600, now), 2)
+        self.assertEqual(watch._minutes_before_alert("unhealthy", None, now), 2)
+        self.assertEqual(watch._minutes_before_alert("down", now - 120, now), 2)
+
     def test_error_summary(self):
         self.assertEqual(watch._error_summary(["2026-10-07 12:31:59,726 ERROR xiap.llm: gemini failed after 90.0s: TimeoutError"]),
                          "xiap.llm: gemini failed after 90.0s: TimeoutError")
