@@ -137,8 +137,10 @@ def state(trouble):
            "detail": f"Now running the image published {p} min ago.\nFreed {f} MB of old images."}
           for m, p, f in ((25, 1, 9), (31, 4, 9), (38, 3, 9), (52, 8, 746))),
         {"t": now - 95 * 60, "level": "warn", "title": "Errors in discord-bot's log", "service": "discord-bot",
-         "detail": "bot.llm: gemini failed after 90.0s: TimeoutError",
-         "log": ["2026-10-07 17:10:22,465 ERROR bot.llm: gemini failed after 90.0s: TimeoutError"]},
+         "detail": "bot.llm: gemini failed after 10.2s: all keys failed: the model is overloaded right now, try again later",
+         "log": ["2026-10-07 17:10:22,465 ERROR bot.llm: gemini failed after 10.2s: all keys failed: "
+                 "the model is overloaded right now, try again later",
+                 "2026-10-07 17:10:22,470 INFO bot.llm: falling back to the cached reply"]},
         {"t": now - 3 * 3600, "level": "ok", "title": "discord-bot is back up", "service": "discord-bot", "detail": ""},
         {"t": now - 3 * 3600 - 120, "level": "error", "title": "discord-bot crashed", "service": "discord-bot",
          "detail": "Exited with code 1. It restarts automatically.",

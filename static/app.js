@@ -631,7 +631,7 @@ function eventRow(e, existing, now, fresh, nested = false) {
         <span class="ev-body">${body}</span>
         <span class="ev-when"><span class="t"></span>${expandable ? icon("chevron") : ""}</span>
       </${tag}>
-      ${expandable ? `<div class="ev-log"><div><pre>${esc(e.log && e.log.length ? e.log.join("\n") : e.detail)}</pre></div></div>` : ""}`;
+      ${expandable ? `<div class="ev-log"><div><pre>${(e.log && e.log.length ? e.log : e.detail.split("\n")).map((l) => `<span>${esc(l)}</span>`).join("")}</pre></div></div>` : ""}`;
     if (openEvents.has(key)) li.classList.add("open");
   }
   setWhen(li, e.t, now);

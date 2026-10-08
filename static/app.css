@@ -386,7 +386,8 @@ li.open > .ev .ev-when .i { transform: rotate(90deg); }
 .ev-log { display: grid; grid-template-rows: 0fr; transition: grid-template-rows .3s var(--ease); }
 li.open > .ev-log { grid-template-rows: 1fr; }
 .ev-log > div { overflow: hidden; }
-.ev-log pre { margin: 0 16px 14px 58px; padding: 10px 12px; font: 12px/1.5 var(--mono); background: var(--bg); border: 1px solid var(--border); border-radius: 10px; overflow-x: auto; white-space: pre; max-height: 320px; }
+.ev-log pre { margin: 0 16px 14px 58px; padding: 10px 12px; font: 12px/1.5 var(--mono); background: var(--bg); border: 1px solid var(--border); border-radius: 10px; overflow-y: auto; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; }
+.ev-log pre > span { display: block; min-height: 1.5em; padding-left: 2ch; text-indent: -2ch; } /* a wrapped line hangs, so each entry still reads as one */
 .feed-sub { list-style: none; padding: 0; margin: 0; border-top: 1px solid var(--border); background: color-mix(in srgb, var(--surface-2) 45%, transparent); }
 .feed-sub .ev { grid-template-columns: minmax(0, 1fr) auto; padding: 6px 16px 6px 58px; }
 .feed-sub .ev-body { min-height: 30px; align-content: center; }
