@@ -40,7 +40,7 @@ async function shot(browser, { url, file, scheme = "dark", width = 1200, height 
   await shot(browser, {
     url: NORMAL, file: "activity-dark.png", height: 700,
     before: async (page) => {
-      await page.click('#feed > li:not(.repeats) > button.ev');  // the crash, not the folded updates
+      await page.click('#feed > li > button.ev:has-text("crashed")');
       await page.waitForTimeout(400);
       await page.evaluate(() => document.querySelector("#feed").scrollIntoView({ block: "center" }));
       await page.waitForTimeout(300);
