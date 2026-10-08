@@ -7,6 +7,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime
 
 from . import config, store
 
@@ -32,6 +33,18 @@ def alert(level, title, detail="", service=None, fields=None, log_lines=None, di
         _outbox.put((level, title, detail, service, fields or [], log_lines or []))
 
 
+def ago(seconds) -> str:
+    """A duration in words for alert text: "45 s", "12 min", "3 h 5 min", "4 days"."""
+    seconds = int(seconds)
+    if seconds < 90:
+        return f"{seconds} s"
+    if seconds < 5400:
+        return f"{seconds // 60} min"
+    if seconds < 172800:
+        return f"{seconds // 3600} h {seconds % 3600 // 60} min"
+    return f"{seconds // 86400} days"
+
+
 def muted() -> bool:
     return store.load_state().get("muted_until", 0) > time.time()
 
@@ -46,7 +59,7 @@ def _embed(level, title, detail, service, fields, log_lines):
         "title": f"{emoji} {title}"[:256],
         "description": description[:4000],
         "color": colour,
-        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
         "footer": {"text": config.HOSTNAME + (f" · {service}" if service else "")},
     }
     if fields:
@@ -68,14 +81,25 @@ def _post(payload) -> bool:
             return True
         except urllib.error.HTTPError as e:
             if e.code == 429:
-                time.sleep(float(json.loads(e.read() or b"{}").get("retry_after", 2)) + 0.5)
+                time.sleep(_retry_after(e) + 0.5)
                 continue
             log.error("Discord refused the alert: HTTP %s", e.code)
+            e.close()
             return e.code < 500
         except OSError as e:  # offline: wait and try again
             log.warning("Discord unreachable (%s), retrying", e)
             time.sleep(min(60, 5 * 2 ** attempt))
     return False
+
+
+def _retry_after(e: urllib.error.HTTPError) -> float:
+    """Seconds Discord asks to wait. Its JSON says so; a rate limit from Cloudflare in front of it is HTML."""
+    try:
+        return min(300.0, float(json.loads(e.read()).get("retry_after", 2)))
+    except (ValueError, TypeError, AttributeError, OSError):
+        return 5.0
+    finally:
+        e.close()
 
 
 def payload(item, ping_user=None) -> dict:
@@ -90,7 +114,12 @@ def payload(item, ping_user=None) -> dict:
 def _sender():
     while True:
         item = _outbox.get()
-        if not _post(payload(item)):
+        try:
+            sent = _post(payload(item))
+        except Exception:  # noqa: BLE001 - drop this one alert rather than stop sending
+            log.exception("sending an alert failed")
+            continue
+        if not sent:
             time.sleep(60)
             _outbox.put(item)  # keep it until the network comes back
 

@@ -1,23 +1,20 @@
 """Scheduled jobs: systemd timers, and anything that pings /api/ping/<name> when it finishes (cron jobs,
 scripts on other machines). Alerts when a run fails, and when one doesn't happen on time."""
 
-import re
 import subprocess
 import time
 from types import SimpleNamespace
 
 from . import config, services, store
-from .notify import alert
-
-NAME_RE = re.compile(r"^[\w.-]{1,64}$")
+from .notify import ago, alert
 
 _jobs = {j.name: j for j in config.load_jobs()}
 timers: dict[str, dict] = {}  # name -> what systemd says about the timer and its last run
 
 
 def reload():
-    _jobs.clear()
-    _jobs.update({j.name: j for j in config.load_jobs()})
+    global _jobs
+    _jobs = {j.name: j for j in config.load_jobs()}  # a new dict, so other threads can finish going through the old one
 
 
 def jobs_list():
@@ -49,20 +46,18 @@ def as_service(job):
 def record(job, ok: bool, code=None, took=None, log_lines=None, t=None, quiet=False):
     """Remember one finished run and alert when it failed, or when it worked again after a problem."""
     t = t or time.time()
-    state = store.load_state()
-    runs = state.get("job_runs", {})
-    runs[job.name] = (runs.get(job.name, []) + [{"t": t, "ok": ok, "code": code, "took": took}])[-30:]
-    logs = state.get("job_logs", {})
-    if log_lines is not None:
-        logs[job.name] = [l[:400] for l in log_lines[-40:]]
-    problems = state.get("job_problems", {})
-    before = problems.get(job.name)
-    if ok:
-        if before in ("failed", "late"):  # "off" stays until the timer is on again
-            problems.pop(job.name)
-    else:
-        problems[job.name] = "failed"
-    store.update_state(job_runs=runs, job_logs=logs, job_problems=problems)
+    with store.edit_state() as state:
+        runs = state.setdefault("job_runs", {})
+        runs[job.name] = (runs.get(job.name, []) + [{"t": t, "ok": ok, "code": code, "took": took}])[-30:]
+        if log_lines is not None:
+            state.setdefault("job_logs", {})[job.name] = [l[:400] for l in log_lines[-40:]]
+        problems = state.setdefault("job_problems", {})
+        before = problems.get(job.name)
+        if ok:
+            if before in ("failed", "late"):  # "off" stays until the timer is on again
+                problems.pop(job.name)
+        else:
+            problems[job.name] = "failed"
     if quiet:
         return
     if not ok:
@@ -115,12 +110,12 @@ def _poll_timer(job):
     finished = info["finished"]
     if not finished or info["running"]:
         return
-    seen = store.load_state().get("job_seen_runs", {})
-    if seen.get(job.name) == finished:
-        return
-    first = job.name not in seen
-    seen[job.name] = finished
-    store.update_state(job_seen_runs=seen)
+    with store.edit_state() as state:
+        seen = state.setdefault("job_seen_runs", {})
+        if seen.get(job.name) == finished:
+            return
+        first = job.name not in seen
+        seen[job.name] = finished
     ok = info["result"] == "success"
     took = finished - info["started"] if info["started"] and finished >= info["started"] else None
     lines = None if ok else services.recent_logs(as_service(job), 30)  # the Logs button streams the journal anyway
@@ -134,35 +129,35 @@ def last_run(job):
 
 def _check_late(job, now):
     """Alert once when a run is overdue, or the timer was switched off."""
-    state = store.load_state()
-    problems = state.get("job_problems", {})
-    seen = state.get("job_seen", {})
-    if job.name not in seen:
-        seen[job.name] = now
-        store.update_state(job_seen=seen)
+    with store.edit_state() as state:
+        first_seen = state.setdefault("job_seen", {}).setdefault(job.name, now)
     timer = timers.get(job.name) if job.timer else None
     late = off = False
     if timer is not None and timer["found"] and not timer["active"]:
         off = True
     elif job.every:
         last = last_run(job)
-        since = max(last["t"] if last else 0, (timer or {}).get("last") or 0) or seen[job.name]
+        since = max(last["t"] if last else 0, (timer or {}).get("last") or 0) or first_seen
         late = now > since + job.every + job.grace and not (timer or {}).get("running")
-    current = problems.get(job.name)
-    if late or off:
-        if current in ("late", "off", "failed"):
+    with store.edit_state() as state:
+        problems = state.setdefault("job_problems", {})
+        current = problems.get(job.name)
+        if late or off:
+            if current in ("late", "off", "failed"):
+                return
+            problems[job.name] = "off" if off else "late"
+        elif current in ("late", "off"):
+            problems.pop(job.name)
+        else:
             return
-        problems[job.name] = "off" if off else "late"
-        store.update_state(job_problems=problems)
+    if late or off:
         if off:
             alert("warn", f"{job.name}'s timer is off", f"{job.timer} isn't active, so it won't run. "
                   f"Turn it back on with systemctl{' --user' if job.user else ''} enable --now {job.timer}.", job.name)
         else:
             alert("warn", f"{job.name} didn't run", f"It should run every {_human(job.every)}; "
-                  f"the last run was {_ago_text(since, now)}.", job.name)
-    elif current in ("late", "off"):
-        problems.pop(job.name)
-        store.update_state(job_problems=problems)
+                  f"the last run was {ago(now - since)} ago.", job.name)
+    else:
         alert("ok", f"{job.name}'s timer is on again" if current == "off" else f"{job.name} ran again", service=job.name)
 
 
@@ -172,11 +167,6 @@ def _human(sec):
             k = sec // n
             return f"{k} {unit}s" if k > 1 else unit
     return f"{sec} s"
-
-
-def _ago_text(t, now):
-    from .watch import _ago
-    return f"{_ago(now - t)} ago"
 
 
 def poll():
@@ -189,8 +179,7 @@ def poll():
 
 # ---- what the page shows ---------------------------------------------------------------
 
-def status(job, now=None) -> dict:
-    now = now or time.time()
+def status(job) -> dict:
     state = store.load_state()
     runs = state.get("job_runs", {}).get(job.name, [])
     timer = timers.get(job.name) if job.timer else None

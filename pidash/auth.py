@@ -16,7 +16,7 @@ FAILURE_WINDOW = 300      # ... within this many seconds, then locked until the 
 
 _N, _R, _P = 2 ** 14, 8, 1
 _failures: dict[str, list[float]] = {}
-_lock = threading.Lock()
+_lock = threading.Lock()  # _failures
 
 
 def _b64(b: bytes) -> str:
@@ -50,10 +50,10 @@ def _key(token: str) -> str:
 def new_session() -> str:
     token = secrets.token_urlsafe(32)
     now = time.time()
-    with _lock:
-        sessions = {k: exp for k, exp in store.load_state().get("sessions", {}).items() if exp > now}
+    with store.edit_state() as state:
+        sessions = {k: exp for k, exp in state.get("sessions", {}).items() if exp > now}
         sessions[_key(token)] = now + SESSION_DAYS * 86400
-        store.update_state(sessions=sessions)
+        state["sessions"] = sessions
     return token
 
 
@@ -66,10 +66,8 @@ def valid_session(token: str | None) -> bool:
 def end_session(token: str | None):
     if not token:
         return
-    with _lock:
-        sessions = store.load_state().get("sessions", {})
-        sessions.pop(_key(token), None)
-        store.update_state(sessions=sessions)
+    with store.edit_state() as state:
+        state.get("sessions", {}).pop(_key(token), None)
 
 
 # ---- guessing ----------------------------------------------------------------------------------
@@ -77,8 +75,9 @@ def end_session(token: str | None):
 def locked_out(addr: str) -> bool:
     now = time.time()
     with _lock:
-        recent = [t for t in _failures.get(addr, []) if now - t < FAILURE_WINDOW]
-        _failures[addr] = recent
+        recent = [t for t in _failures.pop(addr, []) if now - t < FAILURE_WINDOW]
+        if recent:  # forget addresses whose failures have all expired
+            _failures[addr] = recent
         return len(recent) >= MAX_FAILURES
 
 

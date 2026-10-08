@@ -5,15 +5,15 @@ import itertools
 import json
 import os
 import re
+import shlex
 import subprocess
 import threading
 import time
 import urllib.request
 from pathlib import Path
 
-from . import config, store
+from . import config, notify, store
 
-HOME = Path.home()
 ENV = {
     **os.environ,
     "PATH": ":".join([*config.EXTRA_PATH, "/usr/local/bin", "/usr/bin", "/bin"]),
@@ -32,15 +32,20 @@ _cpu_prev: dict[str, tuple] = {}   # name -> (usage_usec, monotonic)
 
 
 def run(cmd, cwd=None, timeout=30):
+    """(exit code, output). The output is stdout alone when the command worked, so warnings on stderr don't
+    end up in what gets parsed, and stdout plus stderr when it failed, so the error can be shown."""
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd, env=ENV)
-        return p.returncode, p.stdout + p.stderr
     except (OSError, subprocess.TimeoutExpired) as e:
         return 1, str(e)
+    return p.returncode, p.stdout if p.returncode == 0 else p.stdout + p.stderr
 
 
-def _systemctl(svc):
-    return ["systemctl", "--user"] if svc.kind == "systemd-user" else ["sudo", "-n", "systemctl"]
+def _systemctl(svc, sudo=False):
+    """Reading a system unit's status needs no root; starting and stopping it does."""
+    if svc.kind == "systemd-user":
+        return ["systemctl", "--user"]
+    return ["sudo", "-n", "systemctl"] if sudo else ["systemctl"]
 
 
 def _parse_systemd_time(text):
@@ -108,7 +113,7 @@ def _parse_docker_time(ts):
 
 def _systemd_status(svc):
     props = "ActiveState,SubState,Result,ActiveEnterTimestamp,InactiveEnterTimestamp,NRestarts,ControlGroup,MainPID,ExecMainStatus"
-    code, out = run([*_systemctl(svc), "show", svc.unit, "-p", props], timeout=10)
+    _, out = run([*_systemctl(svc), "show", svc.unit, "-p", props], timeout=10)
     p = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
     active = p.get("ActiveState", "unknown")
     mem, cpu = _cgroup_usage(svc.name, p.get("ControlGroup", "")) if active == "active" and p.get("ControlGroup") else (None, None)
@@ -165,7 +170,7 @@ def run_check(svc, force=False):
         checks.pop(svc.name, None)
         return
     prev = checks.get(svc.name)
-    if prev and not force and time.time() - prev["t"] < svc.check.get("every", 300):
+    if prev and not force and time.time() - prev["t"] < config.seconds(svc.check.get("every", 300)):
         return
     code, _ = run(["/bin/bash", "-c", svc.check["command"]], cwd=svc.path if svc.dir else None, timeout=60)
     checks[svc.name] = {"ok": code == 0, "problem": svc.check.get("problem", "Its check is failing."), "t": time.time()}
@@ -192,7 +197,8 @@ def _refresh_git(svc, fetch):
     code, behind = run(["git", "-C", repo, "rev-list", "--count", "HEAD..@{u}"])
     behind = int(behind) if code == 0 and behind.strip().isdigit() else 0
     newest = run(["git", "-C", repo, "log", "-1", "--format=%h %s", "@{u}"])[1].strip() if behind else ""
-    target = run(["git", "-C", repo, "rev-parse", "--short", "@{u}"])[1].strip()
+    code, target = run(["git", "-C", repo, "rev-parse", "--short", "@{u}"])
+    target = target.strip() if code == 0 else ""  # no upstream branch: nothing to update to
     dirty = bool(run(["git", "-C", repo, "status", "--porcelain", "--untracked-files=no"])[1].strip())
     prev = source.get(svc.name, {})
     source[svc.name] = {"kind": "git", "sha": sha, "subject": subject, "time": int(ct), "behind": behind,
@@ -281,6 +287,8 @@ def recent_logs(svc, lines=20) -> list[str]:
 
 
 SIZE_UNITS = {"B": 1, "kB": 1e3, "KB": 1e3, "MB": 1e6, "GB": 1e9, "TB": 1e12}
+
+
 def prune_steps():
     """(command, the line that says how much it freed) for each cleanup."""
     cache = ["docker", "builder", "prune", "-f", "--all"]
@@ -296,7 +304,7 @@ def prune_images(job=None) -> str:
     """Remove images that no tag points to and no container uses, and build cache beyond BUILD_CACHE_GB
     (least recently used first): what `compose pull` and `up --build` leave behind.
     Returns the space freed ("1.2 GB"), or ""."""
-    if not config.PRUNE_IMAGES or any(not j["done"] and j["action"] == "update" and j is not job for j in jobs.values()):
+    if not config.PRUNE_IMAGES or any(not j["done"] and j["action"] == "update" and j is not job for j in list(jobs.values())):
         return ""  # another update may be building right now; the next update cleans up
     freed = 0.0
     for cmd, total_re in prune_steps():
@@ -314,7 +322,7 @@ def prune_images(job=None) -> str:
 # ---- actions -----------------------------------------------------------------
 
 jobs: dict[str, dict] = {}
-_ids = itertools.count(1)
+_ids = itertools.count(int(time.time() * 1000))  # not reused after a restart, so the page can't mix up jobs
 
 
 def _steps(svc, action):
@@ -323,12 +331,12 @@ def _steps(svc, action):
     if svc.kind == "compose":
         return {"start": ["docker compose up -d"], "stop": ["docker compose stop"],
                 "restart": ["docker compose restart"]}[action]
-    sysctl = " ".join(_systemctl(svc))
-    return [f"{sysctl} {action} {svc.unit}"]
+    return [shlex.join([*_systemctl(svc, sudo=True), action, svc.unit])]
 
 
 def running_job(svc):
-    return next((j["action"] for j in jobs.values() if j["service"] == svc.name and not j["done"]), None)
+    # list(): other threads add and drop jobs, and a dict can't be iterated while that happens
+    return next((j["action"] for j in list(jobs.values()) if j["service"] == svc.name and not j["done"]), None)
 
 
 def start_job(svc, action, auto=False) -> dict:
@@ -336,31 +344,38 @@ def start_job(svc, action, auto=False) -> dict:
            "done": False, "ok": None, "started": time.time(), "auto": auto}
     jobs[job["id"]] = job
     for old in sorted(jobs, key=int)[:-30]:
-        jobs.pop(old, None)
+        if jobs[old]["done"]:
+            jobs.pop(old, None)
 
-    stopped = set(store.load_state().get("stopped", []))
-    if action == "stop":
-        stopped.add(svc.name)
-    elif action in ("start", "restart", "update"):
-        stopped.discard(svc.name)
-    store.update_state(stopped=sorted(stopped))
+    with store.edit_state() as state:
+        stopped = set(state.get("stopped", []))
+        if action == "stop":
+            stopped.add(svc.name)
+        else:
+            stopped.discard(svc.name)
+        state["stopped"] = sorted(stopped)
 
     def work():
-        ok = True
-        for step in _steps(svc, action):
-            job["lines"].append(f"$ {step}")
-            try:
-                p = subprocess.Popen(["/bin/bash", "-c", step], cwd=svc.path if svc.dir else None, env=ENV,
-                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-                for line in p.stdout:
-                    job["lines"].append(line.rstrip())
-                ok = p.wait() == 0
-            except OSError as e:
-                job["lines"].append(str(e))
-                ok = False
-            if not ok:
-                break
-        freed = prune_images(job) if ok and action == "update" and svc.kind == "compose" and not auto else ""
+        ok, freed = True, ""
+        try:
+            for step in _steps(svc, action):
+                job["lines"].append(f"$ {step}")
+                try:
+                    p = subprocess.Popen(["/bin/bash", "-c", step], cwd=svc.path if svc.dir else None, env=ENV,
+                                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                         errors="replace")
+                    for line in p.stdout:
+                        job["lines"].append(line.rstrip())
+                    ok = p.wait() == 0
+                except OSError as e:
+                    job["lines"].append(str(e))
+                    ok = False
+                if not ok:
+                    break
+            freed = prune_images(job) if ok and action == "update" and svc.kind == "compose" and not auto else ""
+        except Exception as e:  # noqa: BLE001 - finish whatever happened, or the service would look busy forever
+            job["lines"].append(f"pi-dash: {e}")
+            ok = False
         job["ok"], job["done"] = ok, True
         if action == "update":
             refresh_source(svc, fetch=False)
@@ -368,7 +383,6 @@ def start_job(svc, action, auto=False) -> dict:
         if auto:
             return  # the auto-updater reports the outcome itself, after checking the service came back
         verb = {"start": "Started", "stop": "Stopped", "restart": "Restarted", "update": "Updated"}[action]
-        from . import notify
         if ok:
             notify.alert("info", f"{verb} {svc.name} from the dashboard", f"Freed {freed} of old images." if freed else "",
                          service=svc.name, discord=False)

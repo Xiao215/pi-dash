@@ -31,7 +31,6 @@
       <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></symbol>
       <symbol id="i-power" viewBox="0 0 24 24"><path d="M12 2v10M18.4 6.6a9 9 0 1 1-12.77.04"/></symbol>
       <symbol id="i-send" viewBox="0 0 24 24"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></symbol>
-      <symbol id="i-list" viewBox="0 0 24 24"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></symbol>
       <symbol id="i-alert" viewBox="0 0 24 24"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4M12 17h.01"/></symbol>
       <symbol id="i-check" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></symbol>
       <symbol id="i-x-circle" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="m15 9-6 6M9 9l6 6"/></symbol>
@@ -42,8 +41,6 @@
       <symbol id="i-box" viewBox="0 0 24 24"><path d="M11 21.73a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73z"/><path d="M12 22V12M3.3 7l8.7 5 8.7-5M7.5 4.27l9 5.15"/></symbol>
       <symbol id="i-git" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M3 12h6M15 12h6"/></symbol>
       <symbol id="i-arrow-down" viewBox="0 0 24 24"><path d="M12 5v14M19 12l-7 7-7-7"/></symbol>
-      <symbol id="i-pause" viewBox="0 0 24 24"><rect x="14" y="4" width="4" height="16" rx="1"/><rect x="6" y="4" width="4" height="16" rx="1"/></symbol>
-      <symbol id="i-net" viewBox="0 0 24 24"><path d="M12 3v14M7 12l5 5 5-5"/><path d="M5 21h14"/></symbol>
       <symbol id="i-calendar" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></symbol>
       <symbol id="i-package" viewBox="0 0 24 24"><path d="M16.5 9.4 7.55 4.24"/><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="M3.27 6.96 12 12.01l8.73-5.05M12 22.08V12"/></symbol>
       <symbol id="i-heart" viewBox="0 0 24 24"><path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/><path d="M3.22 12H9.5l.5-1 2 4.5 2-7 1.5 3.5h5.27"/></symbol>
@@ -90,7 +87,7 @@
   <div class="banner" id="banner" hidden></div>
 
   <main id="home">
-    <section aria-label="The Pi" class="pi-section">
+    <section aria-label="The Pi">
       <div class="stats" id="stats"></div>
       <div class="info" id="info"></div>
     </section>
@@ -107,7 +104,7 @@
 
     <section>
       <div class="section-head"><h2>Network <span class="count">last 6 h</span></h2></div>
-      <div class="netcard" id="netcard">
+      <div class="netcard">
         <div class="net-now" id="net-now"><span class="skel">loading</span></div>
         <div class="chart" id="net-chart"></div>
       </div>
@@ -158,7 +155,7 @@
         <div class="card pad" id="sp-ms-card"><div class="card-head"><h3>Health check</h3><span class="muted small">response time</span></div><div class="chart" id="sp-ms"></div></div>
       </div>
       <div class="two-col">
-        <div class="card pad" id="sp-code-card"><div class="card-head"><h3>Code</h3><span id="sp-auto"></span></div><div id="sp-code"></div></div>
+        <div class="card pad"><div class="card-head"><h3>Code</h3><span id="sp-auto"></span></div><div id="sp-code"></div></div>
         <div class="card pad"><div class="card-head"><h3>Setup</h3><span class="muted small">from services.json</span></div><dl class="setup" id="sp-setup"></dl></div>
       </div>
       <div>

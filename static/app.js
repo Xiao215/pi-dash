@@ -62,6 +62,8 @@ function every(sec) {
 function put(el, html) {
   if (el._html !== html) { el.innerHTML = html; el._html = html; }
 }
+/** Empty an element, and forget what put() last wrote there so its next put() isn't skipped. */
+function clear(el) { el.innerHTML = ""; el._html = null; }
 function cls(el, value) { if (el.className !== value) el.className = value; }
 
 // ---- api + toasts ---------------------------------------------------------------
@@ -70,7 +72,7 @@ async function api(path, opts = {}) {
   const res = await fetch(path, { ...opts, headers: { "X-Pi-Dash": "1", "Content-Type": "application/json", ...(opts.headers || {}) } });
   if (res.status === 401) { location.reload(); throw new Error("Signed out"); }  // shows the sign-in page
   const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(body.error || res.statusText);
+  if (!res.ok) throw Object.assign(new Error(body.error || res.statusText), { status: res.status });
   return body;
 }
 
@@ -85,9 +87,9 @@ function toast(text, bad = false) {
 // ---- Pi: stat cards with 24 h sparklines ----------------------------------------
 
 const STATS = [
-  { key: "cpu", icon: "cpu", label: "CPU", spark: true, range: [0, 100] },
-  { key: "mem", icon: "memory", label: "Memory", spark: true, range: [0, 100] },
-  { key: "temp", icon: "temp", label: "Temperature", spark: true, range: [20, 90] },
+  { key: "cpu", icon: "cpu", label: "CPU", spark: true },
+  { key: "mem", icon: "memory", label: "Memory", spark: true },
+  { key: "temp", icon: "temp", label: "Temperature", spark: true },
   { key: "disk", icon: "disk", label: "Disk" },
 ];
 
@@ -146,7 +148,7 @@ function setInfo(key, value, level = "", title = "") {
   const el = $(`#info-${key}`);
   cls(el, `info-cell ${level}`);
   put($(".info-value", el), value);
-  el.title = `${$(".info-label", el).textContent}: ${title || el.textContent}`;
+  el.title = `${$(".info-label", el).textContent}: ${title || $(".info-value", el).textContent}`;
 }
 
 function renderPi(data) {
@@ -233,7 +235,7 @@ function renderJobs(data) {
   const bad = jobs.filter((j) => ["failed", "late", "off", "missing"].includes(j.state)).length;
   put($("#jobs-count"), bad ? `${bad} need${bad > 1 ? "" : "s"} attention` : `${jobs.length} on schedule`);
   put($("#jobs"), jobs.map((j) => {
-    const [label, tone] = JOB_STATE[j.state] || [j.state, ""];
+    const [label, tone] = JOB_STATE[j.state] || [esc(j.state), ""];
     const r = j.last;
     const facts = [
       r ? `<span>${r.ok ? "Last run" : "Failed"} <b>${ago(r.t, data.now)}</b>${r.took != null ? ` · took ${dur(r.took)}` : ""}${!r.ok && r.code ? ` · exit code ${r.code}` : ""}</span>` : "",
@@ -482,7 +484,7 @@ function renderServices(data) {
     cards.clear();
     return;
   }
-  if (box.querySelector(".empty, .skel-card")) box.innerHTML = "";
+  if (box.querySelector(".empty, .skel-card")) clear(box);
   const up = data.services.filter((s) => s.state === "up").length, total = data.services.length;
   put($("#svc-count"), up === total ? `${total} running` : `${up} of ${total} running`);
   const seen = new Set();
@@ -552,8 +554,8 @@ function drawTimeline(el, segs, since, now, ticks) {
   put($(".track", el), (segs || []).map(([a, b, st]) => {
     const mins = Math.max(1, Math.round((b - a) / 60));
     const len = mins >= 120 ? `${Math.floor(mins / 60)} h ${mins % 60} min` : `${mins} min`;
-    const label = `${when(a)}–${hm(b)} · ${STATE_LABEL[st] || st} (${len})`;
-    return `<i class="${st}" style="left:${pos(a).toFixed(3)}%;width:${(pos(b) - pos(a)).toFixed(3)}%" title="${label}"></i>`;
+    const label = `${when(a)}–${hm(b)} · ${STATE_LABEL[st] || esc(st)} (${len})`;
+    return `<i class="${esc(st)}" style="left:${pos(a).toFixed(3)}%;width:${(pos(b) - pos(a)).toFixed(3)}%" title="${label}"></i>`;
   }).join(""));
   put($(".ticks", el), ticks.filter(([t]) => t > since + span * 0.04 && t < now - span * 0.1)  // none past the start, none crowding "now"
     .map(([t, label]) => `<span style="left:${pos(t).toFixed(2)}%">${esc(label)}</span>`).join("") + `<span class="now">now</span>`);
@@ -627,7 +629,7 @@ function eventRow(e, existing, now, fresh, nested = false) {
     const body = nested && e.detail ? detail : `<span class="ev-title">${esc(e.title)}${e.service && !nested ? `<span class="chip">${esc(e.service)}</span>` : ""}</span>${detail}`;
     li.innerHTML = `
       <${tag} class="ev${e.detail ? " has-detail" : ""}" ${expandable ? `aria-expanded="false"` : ""}>
-        ${nested ? "" : `<span class="ev-ico ${e.level}">${icon(LEVEL_ICON[e.level] || "info")}</span>`}
+        ${nested ? "" : `<span class="ev-ico ${esc(e.level)}">${icon(LEVEL_ICON[e.level] || "info")}</span>`}
         <span class="ev-body">${body}</span>
         <span class="ev-when"><span class="t"></span>${expandable ? icon("chevron") : ""}</span>
       </${tag}>
@@ -649,7 +651,7 @@ function repeatRow(run, existing, now, isFresh) {
     li.className = "repeats";
     li.innerHTML = `
       <button class="ev has-detail" aria-expanded="false">
-        <span class="ev-ico ${a.level}">${icon(LEVEL_ICON[a.level] || "info")}</span>
+        <span class="ev-ico ${esc(a.level)}">${icon(LEVEL_ICON[a.level] || "info")}</span>
         <span class="ev-body"><span class="ev-title">${esc(a.title)}${a.service ? `<span class="chip">${esc(a.service)}</span>` : ""}</span><span class="ev-detail"></span></span>
         <span class="ev-when"><span class="t"></span>${icon("chevron")}</span>
       </button>
@@ -727,7 +729,7 @@ $("#feed-filter").addEventListener("click", (ev) => {
   feedFilter = b.dataset.filter;
   localSet("feedFilter", feedFilter);
   syncFilter();
-  $("#feed").innerHTML = "";
+  clear($("#feed"));
   $("#feed")._rendered = false;
   if (last) renderFeed(last.events, last.now);
 });
@@ -802,18 +804,19 @@ function render(data) {
   if (firstRender) document.body.classList.remove("loading");
 }
 
-let inflight = false;
+let inflight = false, again = false;
 async function refresh() {
-  if (inflight) return;
+  if (inflight) { again = true; return; }  // e.g. right after an action: refresh once this one is back
   inflight = true;
   let data;
   try {
-    data = await api("/api/state");
+    data = await api("/api/state", { signal: AbortSignal.timeout(10000) });  // a stalled link counts as offline
   } catch {
     if (Date.now() - lastOk > 8000 || !last) setOffline(true);
     return;
   } finally {
     inflight = false;
+    if (again) { again = false; setTimeout(refresh); }
   }
   lastOk = Date.now();
   setOffline(false);
@@ -826,6 +829,7 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) refr
 
 const log = $("#log");
 let stream = null, jobTimer = null, following = true, filterText = "", unseen = 0;
+let drawerGen = 0;  // bumped on every open: a request that comes back later for an older drawer is dropped
 
 function drawerStatus(text, dot = "") {
   $("#drawer-sub-text").textContent = text;
@@ -833,8 +837,12 @@ function drawerStatus(text, dot = "") {
 }
 function openDrawer(title) {
   closeStreams();
+  drawerGen++;
   $("#drawer-title").textContent = title;
   log.innerHTML = `<div class="placeholder">Loading…</div>`;
+  // A filter from the last drawer would quietly hide lines here, maybe with its controls hidden too.
+  $("#log-search").value = ""; filterText = "";
+  $("#errors-only").checked = false; log.classList.remove("errors-only");
   following = true; unseen = 0; $("#jump").hidden = true;
   $("#drawer").classList.add("open");
   $("#drawer").setAttribute("aria-hidden", "false");
@@ -886,18 +894,32 @@ function showLogs(name, url = `/api/services/${encodeURIComponent(name)}/logs`) 
   $("#log-tools").hidden = false;
   log.classList.remove("job");
   drawerStatus("Connecting…", "off");
-  let pending = [], timer = 0, initial = true;
-  stream = new EventSource(url);
-  stream.onopen = () => drawerStatus("Live: new lines appear as they're written");
-  stream.onmessage = (ev) => {
+  let pending = [], timer = 0, initial = true, opened = false;
+  const es = stream = new EventSource(url);
+  es.onopen = () => {
+    if (stream !== es) return;
+    if (opened) {  // a reconnect sends the last lines again: start over rather than show them twice
+      clearTimeout(timer);
+      pending = []; timer = 0; initial = true;
+      log.innerHTML = "";
+    }
+    opened = true;
+    drawerStatus("Live: new lines appear as they're written");
+  };
+  es.onmessage = (ev) => {
     pending.push(JSON.parse(ev.data));
     if (!timer) timer = setTimeout(() => {
+      if (stream !== es) return;
       appendLines(pending, !initial);
       pending = []; timer = 0; initial = false;
     }, initial ? 150 : 60);
   };
-  stream.onerror = () => drawerStatus("Reconnecting…", "off");
-  setTimeout(() => { if (log.querySelector(".placeholder")) log.innerHTML = `<div class="placeholder">No log lines yet.</div>`; }, 2500);
+  es.onerror = () => {
+    if (stream !== es) return;
+    if (es.readyState === EventSource.CLOSED) drawerStatus("Disconnected. Close and open the logs again.", "bad");
+    else drawerStatus("Reconnecting…", "off");
+  };
+  setTimeout(() => { if (stream === es && log.querySelector(".placeholder")) log.innerHTML = `<div class="placeholder">No log lines yet.</div>`; }, 2500);
 }
 
 /** A container that logs somewhere pi-dash can't read: say why there's nothing, and how to fix it. */
@@ -919,11 +941,14 @@ async function showOutput(name) {
   $("#log-tools").hidden = false;
   log.classList.remove("job");
   drawerStatus("Output sent with the last run", "off");
+  const gen = drawerGen;
   try {
     const { lines } = await api(`/api/scheduled/${encodeURIComponent(name)}/output`);
-    log.innerHTML = lines.length ? "" : `<div class="placeholder">The last run sent no output.</div>`;
+    if (gen !== drawerGen) return;
+    if (!lines.length) { log.innerHTML = `<div class="placeholder">The last run sent no output.</div>`; return; }
+    log.innerHTML = "";
     appendLines(lines.map((msg) => ({ msg, error: /\b(error|fatal|failed)\b/i.test(msg) })), false);
-  } catch (e) { log.innerHTML = `<div class="placeholder">${esc(e.message)}</div>`; }
+  } catch (e) { if (gen === drawerGen) log.innerHTML = `<div class="placeholder">${esc(e.message)}</div>`; }
 }
 
 function showJob(job) {
@@ -932,9 +957,11 @@ function showJob(job) {
   log.classList.add("job");
   drawerStatus(`${job.action[0].toUpperCase() + job.action.slice(1)} in progress…`, "busy");
   let seen = 0;
+  const gen = drawerGen;
   const poll = async () => {
     try {
       const j = await api(`/api/jobs/${job.id}?from=${seen}`);
+      if (gen !== drawerGen) return;
       seen = j.total;
       appendLines(j.lines.map((msg) => ({ msg, cmd: msg.startsWith("$ "), error: !msg.startsWith("$ ") && /\b(error|fatal|failed)\b/i.test(msg) })), true);
       if (j.done) {
@@ -946,7 +973,11 @@ function showJob(job) {
         if (following) log.scrollTop = log.scrollHeight;
         return;
       }
-    } catch { /* keep trying */ }
+    } catch (e) {
+      if (gen !== drawerGen) return;
+      if (e.status === 404) return drawerStatus("Lost track of it: pi-dash restarted meanwhile", "bad");
+      // otherwise offline for a moment: keep trying
+    }
     jobTimer = setTimeout(poll, 600);
   };
   poll();
@@ -997,16 +1028,19 @@ async function act(name, action) {
   const svc = last?.services.find((s) => s.name === name);
   if (CONFIRM[action] && !(await confirmBox(...CONFIRM[action](name, svc)))) return;
   busy.set(name, action);
-  if (last) renderServices(last);
+  const rerender = () => { if (last) { renderServices(last); if (page) renderPage(last); } };
+  rerender();
   try {
     const job = await api(`/api/services/${encodeURIComponent(name)}/${action}`, { method: "POST" });
     if (action === "update") showJob(job);
     const wait = async () => {
-      const j = await api(`/api/jobs/${job.id}?from=999999`).catch(() => ({ done: false }));
+      const j = await api(`/api/jobs/${job.id}?from=999999`)
+        .catch((e) => (e.status === 404 ? { done: true, lost: true } : { done: false }));  // 404: pi-dash restarted
       if (!j.done) return setTimeout(wait, 600);
       busy.delete(name);
       const past = { start: "started", stop: "stopped", restart: "restarted", update: "updated" }[action];
-      if (j.ok) toast(`${name} ${past}`);
+      if (j.lost) toast(`Lost track of ${name}'s ${action}: pi-dash restarted meanwhile`, true);
+      else if (j.ok) toast(`${name} ${past}`);
       else { toast(`Couldn't ${action} ${name}`, true); if (action !== "update") showJob(job); }
       refresh();
     };
@@ -1123,16 +1157,18 @@ const RANGE_TEXT = { "6h": ["6 h", "5-minute averages", 1], "24h": ["24 h", "15-
 
 function route() {
   const m = location.hash.match(/^#service\/(.+)$/);
-  const name = m ? decodeURIComponent(m[1]) : null;
+  let name = null;
+  try { name = m ? decodeURIComponent(m[1]) : null; } catch { /* a malformed link: show the home page */ }
   if (name === page) return;
   page = name;
+  pageReq++;  // a history request still on its way is for the page we left
   $("#home").hidden = !!page;
   $("#svc-page").hidden = !page;
   clearTimeout(pageTimer);
   pageData = null;
   if (page) {
-    for (const id of ["#sp-cpu", "#sp-mem", "#sp-ms"]) { $(id).innerHTML = ""; $(id)._key = null; }
-    $("#sp-feed").innerHTML = ""; $("#sp-feed")._rendered = false;
+    for (const id of ["#sp-cpu", "#sp-mem", "#sp-ms"]) { clear($(id)); $(id)._key = null; }
+    clear($("#sp-feed")); $("#sp-feed")._rendered = false;
     put($("#sp-code"), ""); put($("#sp-setup"), ""); put($("#sp-uptime"), "");
     syncRange();
     loadPage();
@@ -1145,6 +1181,7 @@ window.addEventListener("hashchange", route);
 
 async function loadPage() {
   clearTimeout(pageTimer);
+  if (!page) return;
   const name = page, req = ++pageReq;
   $("#sp-body").classList.add("refetch");  // keep the old charts, dimmed, while the new ones load
   try {
@@ -1181,7 +1218,12 @@ function renderPage(data) {
   const s = data.services.find((x) => x.name === page);
   if (!s) {
     put($("#sp-name"), esc(page));
+    cls($("#svc-page .page-head .dot"), "dot");
+    put($("#sp-kind"), "");
+    cls($("#sp-state"), "state-text");
     put($("#sp-state"), "Not in services.json");
+    put($("#sp-desc"), "");
+    $("#sp-problem").hidden = true;
     $("#sp-body").hidden = true;
     put($("#sp-actions"), "");
     return;
@@ -1207,7 +1249,7 @@ function renderPage(data) {
     s.health && !s.health.ok ? `<span>Health check <b>${esc(s.health.error || "failing")}</b></span>` : "",
   ].filter(Boolean).join(""));
   put($("#sp-actions"), actionButtons(s));
-  renderTiles(s, data.now);
+  renderTiles(s);
   renderCode(s, data.now);
 }
 
@@ -1215,7 +1257,7 @@ function tile(label, value, sub, level = "") {
   return `<div class="stat ${level}"><div class="stat-head"><span>${label}</span></div><div class="stat-value">${value}</div><div class="stat-sub" title="${esc(sub)}">${sub}</div></div>`;
 }
 
-function renderTiles(s, now) {
+function renderTiles(s) {
   const h = pageData, rl = RANGE_TEXT[pageRange][0];
   const avg = (xs) => { const v = (xs || []).filter((x) => x != null); return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null; };
   const running = RUNNING.has(s.state);

@@ -3,12 +3,13 @@
 import hashlib
 import ipaddress
 import json
-from http.cookies import CookieError, SimpleCookie
 import logging
+import math
 import mimetypes
 import select
 import subprocess
 import time
+from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -84,7 +85,7 @@ def state():
         svcs.append(s)
     heartbeat = {**watch.heartbeat, "every": config.HEARTBEAT_EVERY} if config.HEARTBEAT_URL else None
     return {"now": now, "hostname": config.HOSTNAME, "pi": system.snapshot(), "services": svcs,
-            "jobs": [scheduled.status(j, now) for j in scheduled.jobs_list()],
+            "jobs": [scheduled.status(j) for j in scheduled.jobs_list()],
             "events": store.events(80), "history": _history(now), "heartbeat": heartbeat, "version": static_version(),
             "muted_until": store.load_state().get("muted_until", 0), "auth": bool(config.PASSWORD_HASH)}
 
@@ -234,7 +235,10 @@ class Handler(BaseHTTPRequestHandler):
                 job = services.jobs.get(parts[2])
                 if not job:
                     return self._json({"error": "no such job"}, 404)
-                start = int(parse_qs(url.query).get("from", ["0"])[0])
+                try:
+                    start = max(0, int(parse_qs(url.query).get("from", ["0"])[0]))
+                except ValueError:
+                    return self._json({"error": "from must be a number"}, 400)
                 return self._json({**job, "lines": job["lines"][start:], "total": len(job["lines"])})
             if parts[:2] == ["api", "services"] and len(parts) == 4 and parts[3] in ("logs", "history"):
                 svc = self._service(parts[2])
@@ -272,9 +276,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": "no such service"}, 404)
             if action == "auto":
                 on = bool(self._body().get("on"))
-                off = set(store.load_state().get("auto_update_off", []))
-                off.discard(svc.name) if on else off.add(svc.name)
-                store.update_state(auto_update_off=sorted(off))
+                with store.edit_state() as st:
+                    off = set(st.get("auto_update_off", []))
+                    if on:
+                        off.discard(svc.name)
+                    else:
+                        off.add(svc.name)
+                    st["auto_update_off"] = sorted(off)
                 notify.alert("info", f"Auto-update {'on' if on else 'off'} for {svc.name}", service=svc.name, discord=False)
                 return self._json({"auto_update": on})
             if services.running_job(svc):
@@ -300,7 +308,12 @@ class Handler(BaseHTTPRequestHandler):
             notify.alert("info", f"Started {job.name} from the dashboard", service=job.name, discord=False)
             return self._json({"ok": True})
         if parts == ["api", "mute"]:
-            hours = float(self._body().get("hours", 0))
+            try:
+                hours = float(self._body().get("hours", 0))
+            except (TypeError, ValueError):
+                hours = math.nan
+            if not 0 <= hours <= 24 * 365:
+                return self._json({"error": "hours must be a number from 0 to 8760"}, 400)
             until = time.time() + hours * 3600 if hours > 0 else 0
             store.update_state(muted_until=until)
             if until:
@@ -321,20 +334,30 @@ class Handler(BaseHTTPRequestHandler):
             watch.send_digest()
             return self._json({"ok": True})
         if parts == ["api", "reload"]:
-            watch.reload_services()
+            try:
+                watch.reload_services()
+            except (OSError, TypeError, ValueError) as e:  # unreadable or invalid JSON, a missing field
+                return self._json({"error": f"{config.REGISTRY}: {e}"}, 400)
             return self._json({"ok": True, "services": [s.name for s in watch.services_list()],
                                "jobs": [j.name for j in scheduled.jobs_list()]})
         self._json({"error": "not found"}, 404)
 
-    def _body(self) -> dict:
+    def _length(self) -> int:
         try:
-            n = int(self.headers.get("Content-Length") or 0)
-            return json.loads(self.rfile.read(n) or b"{}") if 0 < n < 65536 else {}
+            return int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return 0
+
+    def _body(self) -> dict:
+        n = self._length()
+        try:
+            body = json.loads(self.rfile.read(n) or b"{}") if 0 < n < 65536 else {}
         except ValueError:
             return {}
+        return body if isinstance(body, dict) else {}
 
     def _text_body(self, limit=65536) -> str:
-        n = int(self.headers.get("Content-Length") or 0)
+        n = self._length()
         return self.rfile.read(min(n, limit)).decode("utf-8", "replace") if n > 0 else ""
 
     def _page(self, name):
@@ -355,8 +378,11 @@ class Handler(BaseHTTPRequestHandler):
         if STATIC not in path.parents or not path.is_file():
             return self._json({"error": "not found"}, 404)
         data = path.read_bytes()
+        ctype = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        if ctype.startswith("text/") or ctype in ("application/javascript", "image/svg+xml"):
+            ctype += "; charset=utf-8"
         self.send_response(200)
-        self.send_header("Content-Type", (mimetypes.guess_type(path.name)[0] or "application/octet-stream") + "; charset=utf-8")
+        self.send_header("Content-Type", ctype)
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
@@ -401,7 +427,6 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def serve():
-    ThreadingHTTPServer.daemon_threads = True
     httpd = ThreadingHTTPServer((config.HOST, config.PORT), Handler)
     log.info("pi-dash on http://%s:%d", config.HOST, config.PORT)
     httpd.serve_forever()

@@ -5,6 +5,7 @@ set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 USER_NAME="$(id -un)"
+GROUP_NAME="$(id -gn)"
 CONF=/etc/pi-dash/config.toml
 
 [ "$USER_NAME" != root ] || { echo "Run this as your normal user; it uses sudo where it needs to."; exit 1; }
@@ -14,7 +15,7 @@ command -v systemctl >/dev/null || { echo "pi-dash needs systemd."; exit 1; }
 # Settings: created once from the example, then left alone.
 if ! sudo test -f "$CONF"; then
   sudo install -d -m 755 /etc/pi-dash
-  sudo install -m 600 -o "$USER_NAME" -g "$(id -gn)" "$DIR/config.example.toml" "$CONF"
+  sudo install -m 600 -o "$USER_NAME" -g "$GROUP_NAME" "$DIR/config.example.toml" "$CONF"
   echo "Created $CONF"
   if [ -t 0 ]; then
     printf 'Discord webhook URL (hidden; Enter to skip): '; read -rs WEBHOOK; echo
@@ -41,14 +42,16 @@ for g in docker adm systemd-journal video; do
 done
 
 fill() {
-  sed -e "s|@USER@|$USER_NAME|g" -e "s|@UID@|$(id -u)|g" -e "s|@DIR@|$DIR|g" -e "s|@GROUPS@|${GROUPS_FOUND# }|g" "$1"
+  sed -e "s|@USER@|$USER_NAME|g" -e "s|@GROUP@|$GROUP_NAME|g" -e "s|@UID@|$(id -u)|g" -e "s|@DIR@|$DIR|g" \
+      -e "s|@GROUPS@|${GROUPS_FOUND# }|g" "$1"
 }
 
 fill "$DIR/deploy/pi-dash.service" | sudo tee /etc/systemd/system/pi-dash.service >/dev/null
-fill "$DIR/deploy/sudoers" > /tmp/pi-dash.sudoers
-sudo visudo -cf /tmp/pi-dash.sudoers >/dev/null
-sudo install -m 440 /tmp/pi-dash.sudoers /etc/sudoers.d/pi-dash
-rm -f /tmp/pi-dash.sudoers
+SUDOERS="$(mktemp)"  # private to this user, so nobody can swap it between the check and the install
+trap 'rm -f "$SUDOERS"' EXIT
+fill "$DIR/deploy/sudoers" > "$SUDOERS"
+sudo visudo -cf "$SUDOERS" >/dev/null
+sudo install -m 440 "$SUDOERS" /etc/sudoers.d/pi-dash
 
 # Keep your systemd --user services (kind "systemd-user") running when you're logged out.
 sudo loginctl enable-linger "$USER_NAME"

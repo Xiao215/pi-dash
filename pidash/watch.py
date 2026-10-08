@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from . import config, scheduled, services, store, system
-from .notify import alert
+from .notify import ago, alert
 
 log = logging.getLogger(__name__)
 
@@ -25,28 +25,20 @@ _last_crash: dict[str, float] = {}
 _alerted_down: set[str] = set()
 _bad_streak: dict[str, int] = {}
 _last_tick = time.time()  # when the sampler last finished a round; the heartbeat only goes out while it keeps going
+_last_prune = time.time()  # __main__ prunes at startup
 heartbeat = {"ok": None, "t": 0.0, "error": ""}
 
 
 def reload_services():
-    _services.clear()
-    _services.update({s.name: s for s in config.load_services()})
+    """Read the registry again. If it doesn't load, the error is raised and the old lists stay."""
+    global _services
+    loaded = {s.name: s for s in config.load_services()}
     scheduled.reload()
+    _services = loaded  # a new dict, so other threads can finish going through the old one
 
 
 def services_list():
     return list(_services.values())
-
-
-def _ago(seconds):
-    seconds = int(seconds)
-    if seconds < 90:
-        return f"{seconds} s"
-    if seconds < 5400:
-        return f"{seconds // 60} min"
-    if seconds < 172800:
-        return f"{seconds // 3600} h {seconds % 3600 // 60} min"
-    return f"{seconds // 86400} days"
 
 
 # ---- crashes: Docker events ------------------------------------------------------
@@ -63,30 +55,39 @@ def _docker_events():
                 ev = json.loads(line)
             except ValueError:
                 continue
-            action = ev.get("Action") or ev.get("status") or ""
-            attrs = ev.get("Actor", {}).get("Attributes", {})
-            name = attrs.get("name", "?")
-            svc = next((s for s in _services.values() if s.kind == "compose" and (s.container or s.name) == name), None)
-            label = svc.name if svc else name
-            if not svc and not _long_running(name):
-                continue  # one-off/test containers (no restart policy) aren't services
-            if svc and services.running_job(svc):
-                continue  # replaced on purpose by an update/restart, not a crash
-            if action == "die":
-                code = attrs.get("exitCode", "0")
-                if code in ("0", "143") or label in store.load_state().get("stopped", []):
-                    continue  # normal stop
-                _crashed(label, f"Exited with code {code}.", svc)
-            elif action == "oom":
-                _crashed(label, "Killed: it ran out of memory.", svc)
-            elif action.startswith("health_status: unhealthy"):
-                if svc or label in _alerted_down:
-                    continue  # the sampler reports configured services, once they've had time to settle
-                lines = services.recent_logs(svc) if svc else []
-                alert("warn", f"{label} is unhealthy", "Its health check keeps failing.", label, log_lines=lines)
-                _alerted_down.add(label)
+            try:
+                _docker_event(ev)
+            except Exception:  # noqa: BLE001 - one bad event mustn't stop the watcher
+                log.exception("handling a Docker event failed")
         p.wait()
         time.sleep(5)
+
+
+def _docker_event(ev):
+    """React to one container event: a crash, running out of memory, a failing health check."""
+    action = ev.get("Action") or ev.get("status") or ""
+    if action not in ("die", "oom") and not action.startswith("health_status: unhealthy"):
+        return  # starts, health-check execs and the like: the bulk of the events
+    attrs = ev.get("Actor", {}).get("Attributes", {})
+    name = attrs.get("name", "?")
+    svc = next((s for s in _services.values() if s.kind == "compose" and (s.container or s.name) == name), None)
+    label = svc.name if svc else name
+    if not svc and not _long_running(name):
+        return  # one-off/test containers (no restart policy) aren't services
+    if svc and services.running_job(svc):
+        return  # replaced on purpose by an update/restart, not a crash
+    if action == "die":
+        code = attrs.get("exitCode", "0")
+        if code in ("0", "143") or label in store.load_state().get("stopped", []):
+            return  # normal stop
+        _crashed(label, f"Exited with code {code}.", svc)
+    elif action == "oom":
+        _crashed(label, "Killed: it ran out of memory.", svc)
+    elif action.startswith("health_status: unhealthy"):
+        if svc or label in _alerted_down:
+            return  # the sampler reports configured services, once they've had time to settle
+        alert("warn", f"{label} is unhealthy", "Its health check keeps failing.", label)
+        _alerted_down.add(label)
 
 
 def _minutes_before_alert(state, since, now=None):
@@ -103,15 +104,14 @@ def _long_running(container):
 
 def _crashed(label, why, svc):
     now = time.time()
-    recent = [t for t in store.load_state().get("crashes", {}).get(label, []) if now - t < 600] + [now]
-    crashes = store.load_state().get("crashes", {})
-    crashes[label] = recent
-    store.update_state(crashes=crashes)
-    lines = services.recent_logs(svc, 20) if svc else []
+    with store.edit_state() as state:
+        crashes = state.setdefault("crashes", {})
+        recent = crashes[label] = [t for t in crashes.get(label, []) if now - t < 600] + [now]
     if now - _last_crash.get(label, 0) < 600 and len(recent) < 4:
         store.add_event("error", f"{label} crashed again", why, label)
         return
     _last_crash[label] = now
+    lines = services.recent_logs(svc, 20) if svc else []
     if len(recent) >= 4:
         alert("error", f"{label} keeps crashing", f"{len(recent)} crashes in 10 minutes. {why}", label, log_lines=lines)
     else:
@@ -161,8 +161,11 @@ def _journal():
                 batches = [(k, pending.pop(k)) for k in ready]
             for name, batch in batches:
                 extra = _suppressed.pop(name, 0)
-                alert("warn", f"Errors in {name}'s log", _error_summary(batch["lines"], extra), name,
-                      log_lines=batch["lines"][-25:])
+                try:
+                    alert("warn", f"Errors in {name}'s log", _error_summary(batch["lines"], extra), name,
+                          log_lines=batch["lines"][-25:])
+                except Exception:  # noqa: BLE001
+                    log.exception("alerting about %s's log failed", name)
 
     threading.Thread(target=flush, name="error-flush", daemon=True).start()
 
@@ -174,39 +177,47 @@ def _journal():
                 entry = json.loads(line)
             except ValueError:
                 continue
-            msg = entry.get("MESSAGE", "")
-            if isinstance(msg, list):
-                msg = bytes(msg).decode("utf-8", "replace")
-            svc = _match_service(entry)
-
-            # systemd telling us a unit failed (system units too, e.g. a failed update)
-            from_manager = entry.get("_PID") == "1" or entry.get("_COMM") == "systemd"
-            if from_manager and "Failed with result" in msg:
-                if (entry.get("UNIT") or entry.get("USER_UNIT")) in scheduled.units():
-                    continue  # a scheduled job: scheduled.py reports it as "<job> failed"
-                name = svc.name if svc else (entry.get("UNIT") or entry.get("USER_UNIT") or "a system service")
-                if svc and name in store.load_state().get("stopped", []):
-                    continue
-                _crashed(name, msg.strip(), svc)
-                continue
-            if from_manager or not svc:
-                continue
-
-            name = svc.name
-            with lock:
-                if name in pending:
-                    pending[name]["lines"].append(msg.rstrip())
-                    continue
-            if services.ERROR_RE.search(msg):
-                now = time.time()
-                if now - _last_error_alert.get(name, 0) < config.ERROR_COOLDOWN:
-                    _suppressed[name] = _suppressed.get(name, 0) + 1
-                    continue
-                _last_error_alert[name] = now
-                with lock:  # gather the traceback that follows for a few seconds
-                    pending[name] = {"lines": [msg.rstrip()], "until": now + 3}
+            try:
+                _journal_entry(entry, pending, lock)
+            except Exception:  # noqa: BLE001 - one bad entry mustn't stop the watcher
+                log.exception("handling a journal entry failed")
         p.wait()
         time.sleep(5)
+
+
+def _journal_entry(entry, pending, lock):
+    """One journal line: a unit that failed, or an error in a service's log (with the lines that follow it)."""
+    msg = entry.get("MESSAGE", "")
+    if isinstance(msg, list):
+        msg = bytes(msg).decode("utf-8", "replace")
+    svc = _match_service(entry)
+
+    # systemd telling us a unit failed (system units too, e.g. a failed update)
+    from_manager = entry.get("_PID") == "1" or entry.get("_COMM") == "systemd"
+    if from_manager and "Failed with result" in msg:
+        if (entry.get("UNIT") or entry.get("USER_UNIT")) in scheduled.units():
+            return  # a scheduled job: scheduled.py reports it as "<job> failed"
+        name = svc.name if svc else (entry.get("UNIT") or entry.get("USER_UNIT") or "a system service")
+        if svc and name in store.load_state().get("stopped", []):
+            return
+        _crashed(name, msg.strip(), svc)
+        return
+    if from_manager or not svc:
+        return
+
+    name = svc.name
+    with lock:
+        if name in pending:
+            pending[name]["lines"].append(msg.rstrip())
+            return
+    if services.ERROR_RE.search(msg):
+        now = time.time()
+        if now - _last_error_alert.get(name, 0) < config.ERROR_COOLDOWN:
+            _suppressed[name] = _suppressed.get(name, 0) + 1
+            return
+        _last_error_alert[name] = now
+        with lock:  # gather the traceback that follows for a few seconds
+            pending[name] = {"lines": [msg.rstrip()], "until": now + 3}
 
 
 # ---- up/down: sampled every minute, also feeds the uptime bars -----------------
@@ -216,50 +227,61 @@ def _sampler():
     net_prev = (system.net_totals(), time.monotonic())
     offline_since = None
     while True:
-        states, res = {}, {}
-        for svc in list(_services.values()):
-            services.check_health(svc)
-            services.run_check(svc)
-            try:
-                s = services.status(svc)
-                st = s["state"]
-            except Exception:  # noqa: BLE001
-                log.exception("status failed for %s", svc.name)
-                s, st = {}, "unknown"
-            states[svc.name] = st
-            h = services.health.get(svc.name)
-            res[svc.name] = [s.get("cpu"), round(s["mem"] / 2 ** 20, 1) if s.get("mem") is not None else None,
-                             h["ms"] if h and h["ok"] else None]
-            bad = st in ("down", "unhealthy") and not services.running_job(svc)  # not mid-update
-            _bad_streak[svc.name] = _bad_streak.get(svc.name, 0) + 1 if bad else 0
-            if bad and _bad_streak[svc.name] >= _minutes_before_alert(st, s.get("since")) and svc.name not in _alerted_down:
-                c = services.checks.get(svc.name)
-                h = services.health.get(svc.name) or {}
-                if st == "unhealthy" and c and not c["ok"] and h.get("ok", True):
-                    alert("warn", f"{svc.name} needs attention", c["problem"], svc.name)  # running, but e.g. signed out
-                elif st == "unhealthy":
-                    why = f"It's running, but its health check is failing: {h['error']}." if h.get("error") \
-                        else "It's running, but its health check keeps failing."
-                    alert("warn", f"{svc.name} isn't responding", why, svc.name, log_lines=services.recent_logs(svc, 15))
-                else:
-                    alert("error", f"{svc.name} is down", "It isn't running.", svc.name, log_lines=services.recent_logs(svc, 15))
-                _alerted_down.add(svc.name)
-            elif st == "up" and svc.name in _alerted_down:
-                _alerted_down.discard(svc.name)
-                alert("ok", f"{svc.name} is back up", service=svc.name)
-        snap = system.snapshot()
-        net, now = system.net_totals(), time.monotonic()
-        (rx0, tx0), t0 = net_prev
-        rx, tx = ((b - a) / (now - t0) if b >= a and now > t0 else None for a, b in zip((rx0, tx0), net))
-        net_prev = (net, now)
-        online = system.online()
-        store.add_sample(states, {"cpu": snap["cpu"], "temp": round(snap["temp"], 1) if snap["temp"] is not None else None,
-                                  "mem": round(100 - 100 * snap["mem"]["available"] / snap["mem"]["total"], 1),
-                                  "rx": round(rx) if rx is not None else None, "tx": round(tx) if tx is not None else None,
-                                  "online": online}, res)
-        offline_since = _internet(online, offline_since)
-        _last_tick = time.time()
+        try:
+            net_prev, offline_since = _sample_round(net_prev, offline_since)
+            _last_tick = time.time()
+        except Exception:  # noqa: BLE001 - try again next minute; the heartbeat stops if this keeps failing
+            log.exception("sampling failed")
         time.sleep(config.SAMPLE_EVERY)
+
+
+def _sample_round(net_prev, offline_since):
+    states, res = {}, {}
+    for svc in list(_services.values()):
+        try:
+            states[svc.name], res[svc.name] = _sample_service(svc)
+        except Exception:  # noqa: BLE001
+            log.exception("status failed for %s", svc.name)
+            states[svc.name], res[svc.name] = "unknown", [None, None, None]
+    snap = system.snapshot()
+    net, now = system.net_totals(), time.monotonic()
+    (rx0, tx0), t0 = net_prev
+    rx, tx = ((b - a) / (now - t0) if b >= a and now > t0 else None for a, b in zip((rx0, tx0), net))
+    online = system.online()
+    store.add_sample(states, {"cpu": snap["cpu"], "temp": round(snap["temp"], 1) if snap["temp"] is not None else None,
+                              "mem": round(100 - 100 * snap["mem"]["available"] / snap["mem"]["total"], 1),
+                              "rx": round(rx) if rx is not None else None, "tx": round(tx) if tx is not None else None,
+                              "online": online}, res)
+    return (net, now), _internet(online, offline_since)
+
+
+def _sample_service(svc):
+    """One service's state and [cpu %, memory MB, health check ms] for this minute; alerts when it went down
+    or came back."""
+    services.check_health(svc)
+    services.run_check(svc)
+    s = services.status(svc)
+    st = s["state"]
+    h = services.health.get(svc.name) or {}
+    sample = [s.get("cpu"), round(s["mem"] / 2 ** 20, 1) if s.get("mem") is not None else None,
+              h["ms"] if h.get("ok") else None]
+    bad = st in ("down", "unhealthy") and not services.running_job(svc)  # not mid-update
+    _bad_streak[svc.name] = _bad_streak.get(svc.name, 0) + 1 if bad else 0
+    if bad and _bad_streak[svc.name] >= _minutes_before_alert(st, s.get("since")) and svc.name not in _alerted_down:
+        c = services.checks.get(svc.name)
+        if st == "unhealthy" and c and not c["ok"] and h.get("ok", True):
+            alert("warn", f"{svc.name} needs attention", c["problem"], svc.name)  # running, but e.g. signed out
+        elif st == "unhealthy":
+            why = f"It's running, but its health check is failing: {h['error']}." if h.get("error") \
+                else "It's running, but its health check keeps failing."
+            alert("warn", f"{svc.name} isn't responding", why, svc.name, log_lines=services.recent_logs(svc, 15))
+        else:
+            alert("error", f"{svc.name} is down", "It isn't running.", svc.name, log_lines=services.recent_logs(svc, 15))
+        _alerted_down.add(svc.name)
+    elif st == "up" and svc.name in _alerted_down:
+        _alerted_down.discard(svc.name)
+        alert("ok", f"{svc.name} is back up", service=svc.name)
+    return st, sample
 
 
 def _internet(online, offline_since):
@@ -268,7 +290,7 @@ def _internet(online, offline_since):
     if not online:
         return offline_since or now
     if offline_since and now - offline_since >= 120:
-        alert("warn", "Internet was down", f"For about {_ago(now - offline_since)}, from {datetime.fromtimestamp(offline_since):%H:%M} "
+        alert("warn", "Internet was down", f"For about {ago(now - offline_since)}, from {datetime.fromtimestamp(offline_since):%H:%M} "
               f"to {datetime.now():%H:%M}. Alerts from that time arrive late.")
     return None
 
@@ -314,13 +336,12 @@ def _update_loop():
 
 
 def _remember(key, name, value):
-    state = store.load_state()
-    d = state.get(key, {})
-    if value is None:
-        d.pop(name, None)
-    else:
-        d[name] = value
-    store.update_state(**{key: d})
+    with store.edit_state() as state:
+        d = state.setdefault(key, {})
+        if value is None:
+            d.pop(name, None)
+        else:
+            d[name] = value
 
 
 def _maybe_auto_update(svc):
@@ -357,7 +378,7 @@ def _maybe_auto_update(svc):
         if after.get("kind") == "git":
             detail = f"{before} → {after.get('sha')}: {after.get('subject', '')}"
         else:
-            detail = f"Now running the image published {_ago(time.time() - after['time'])} ago." if after.get("time") else "Now running the newest image."
+            detail = f"Now running the image published {ago(time.time() - after['time'])} ago." if after.get("time") else "Now running the newest image."
         freed = services.prune_images() if svc.kind == "compose" else ""  # only now that the new version works
         if freed:
             detail += f"\nFreed {freed} of old images."
@@ -376,14 +397,16 @@ def _maybe_auto_update(svc):
 # ---- the Pi's health, every 10 minutes; alerts only on change --------------------
 
 def _check(key, bad: bool, level, title, detail, ok_title, service=None):
-    problems = store.load_state().get("problems", {})
-    if bad and key not in problems:
-        problems[key] = time.time()
+    with store.edit_state() as state:
+        problems = state.setdefault("problems", {})
+        began = bad and key not in problems
+        since = None if bad else problems.pop(key, None)
+        if began:
+            problems[key] = time.time()
+    if began:
         alert(level, title, detail, service)
-    elif not bad and key in problems:
-        since = problems.pop(key)
-        alert("ok", ok_title, f"Lasted {_ago(time.time() - since)}.", service)
-    store.update_state(problems=problems)
+    elif since is not None:
+        alert("ok", ok_title, f"Lasted {ago(time.time() - since)}.", service)
 
 
 def memory_growth(rows, name, chunks=6):
@@ -438,9 +461,12 @@ def _health_once():
         if not now_flags:
             alert("warn", "Power dipped since the last restart",
                   "The Pi saw low voltage at some point. A weak supply can corrupt the SD card over time.")
-    _, user_failed = services.run(["systemctl", "--user", "--failed", "--plain", "--no-legend"])
-    _, sys_failed = services.run(["systemctl", "--failed", "--plain", "--no-legend"])
-    failed = sorted({l.split()[0] for l in (sys_failed + user_failed).splitlines() if l.strip()} - scheduled.units())
+    failed = set()
+    for cmd in (["systemctl", "--failed"], ["systemctl", "--user", "--failed"]):
+        code, out = services.run([*cmd, "--plain", "--no-legend"])
+        if code == 0:  # e.g. no user manager: an error message, not a list of units
+            failed.update(l.split()[0] for l in out.splitlines() if l.strip())
+    failed = sorted(failed - scheduled.units())
     _check("failed-units", bool(failed), "warn", "Failed: " + ", ".join(failed)[:200],
            "systemd marks these as failed. See them on the dashboard or with systemctl --failed.",
            "No failed services anymore")
@@ -448,6 +474,14 @@ def _health_once():
     _check_memory_growth()
     system.refresh_updates()
     _daily_docker_cleanup()
+    _daily_prune()
+
+
+def _daily_prune():
+    global _last_prune
+    if time.time() - _last_prune >= 86400:
+        _last_prune = time.time()
+        store.prune()
 
 
 def _daily_docker_cleanup():
@@ -472,7 +506,7 @@ def _check_updates():
     offset = state.get("uu_offset", size)
     if size < offset:
         offset = 0  # rotated
-    with path.open() as f:
+    with path.open(errors="replace") as f:
         f.seek(offset)
         new = f.read()
     store.update_state(uu_offset=size)
@@ -562,7 +596,7 @@ def _announce_boot():
     else:
         reason, last_t = _boot_reason()
         down = _downtime(last_t) if last_t else None
-        off = f"\nWas down for about {_ago(down)}." if down is not None else ""
+        off = f"\nWas down for about {ago(down)}." if down is not None else ""
         level = "error" if reason.startswith("unexpected") else "boot"
         alert(level, "Pi restarted", f"Reason: {reason}.{off}\n\n{summary}")
     store.update_state(boot_id=current, planned=None)  # only once announced, so a pi-dash restart mid-wait still announces
@@ -611,7 +645,7 @@ def send_digest():
     incidents = [e for e in store.events(500, since) if e["level"] in ("error", "warn")]
     disk_pct = 100 * snap["disk"]["used"] / snap["disk"]["total"]
     fields = [
-        ("Pi", f"up {_ago(snap['uptime'])} · " + (f"{snap['temp']:.0f} °C · " if snap["temp"] is not None else "") + f"disk {disk_pct:.0f}% · "
+        ("Pi", f"up {ago(snap['uptime'])} · " + (f"{snap['temp']:.0f} °C · " if snap["temp"] is not None else "") + f"disk {disk_pct:.0f}% · "
                f"memory {100 - 100 * snap['mem']['available'] / snap['mem']['total']:.0f}% used", False),
         ("Last 24 h", f"{len(incidents)} problem{'s' if len(incidents) != 1 else ''} · "
                       f"{_updates_since(since)} packages updated" + _pending_text(snap) +
@@ -639,7 +673,7 @@ def _job_text(j):
         return word[j["state"]]
     if not last:
         return "hasn't run yet"
-    return f"ran {_ago(time.time() - last['t'])} ago"
+    return f"ran {ago(time.time() - last['t'])} ago"
 
 
 def _digest():
@@ -653,7 +687,6 @@ def _digest():
         time.sleep((nxt - now).total_seconds())
         try:
             send_digest()
-            store.prune()
         except Exception:  # noqa: BLE001
             log.exception("digest failed")
 

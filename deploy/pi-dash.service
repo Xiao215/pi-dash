@@ -6,7 +6,7 @@ Wants=network-online.target
 
 [Service]
 User=@USER@
-Group=@USER@
+Group=@GROUP@
 SupplementaryGroups=@GROUPS@
 WorkingDirectory=@DIR@
 ExecStart=/usr/bin/python3 -m pidash

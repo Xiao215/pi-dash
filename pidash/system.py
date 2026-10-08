@@ -185,17 +185,24 @@ def _network():
     tailscale = None
     try:
         ts = json.loads(run(["tailscale", "status", "--json"]) or "{}")
-        tailscale = {"state": ts.get("BackendState"),
-                     "name": (ts.get("Self") or {}).get("DNSName", "").rstrip(".")}
+        if ts.get("BackendState"):  # no tailscale here: None, so the page can say it isn't set up
+            tailscale = {"state": ts["BackendState"], "name": (ts.get("Self") or {}).get("DNSName", "").rstrip(".")}
     except ValueError:
         pass
     return {"addresses": addrs, "wifi": wifi, "tailscale": tailscale}
 
 
+def _read(path) -> str:
+    try:
+        return Path(path).read_text()
+    except OSError:
+        return ""
+
+
 def _static():
-    model = Path("/proc/device-tree/model").read_text().strip("\x00\n") if Path("/proc/device-tree/model").exists() else ""
+    model = _read("/proc/device-tree/model").strip("\x00\n")  # Raspberry Pis and other boards with a device tree
     pretty = ""
-    for line in Path("/etc/os-release").read_text().splitlines():
+    for line in _read("/etc/os-release").splitlines():
         if line.startswith("PRETTY_NAME="):
             pretty = line.split("=", 1)[1].strip('"')
     return {"model": model, "os": pretty, "kernel": os.uname().release}
@@ -225,7 +232,4 @@ def snapshot() -> dict:
 
 
 def _reboot_packages() -> list[str]:
-    try:
-        return sorted(set(Path("/var/run/reboot-required.pkgs").read_text().split()))
-    except OSError:
-        return []
+    return sorted(set(_read("/var/run/reboot-required.pkgs").split()))

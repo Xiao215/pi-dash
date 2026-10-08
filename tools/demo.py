@@ -11,7 +11,7 @@ import random
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 STATIC = Path(__file__).resolve().parent.parent / "static"
 GB = 1024 ** 3
@@ -144,7 +144,7 @@ def state(trouble):
         {"t": now - 3 * 3600, "level": "ok", "title": "discord-bot is back up", "service": "discord-bot", "detail": ""},
         {"t": now - 3 * 3600 - 120, "level": "error", "title": "discord-bot crashed", "service": "discord-bot",
          "detail": "Exited with code 1. It restarts automatically.",
-         "log": [*(f'INFO aiohttp.access: 127.0.0.1 "GET /health HTTP/1.1" 200 194 "-" "Python-urllib/3.12"' for _ in range(12)),
+         "log": [*('INFO aiohttp.access: 127.0.0.1 "GET /health HTTP/1.1" 200 194 "-" "Python-urllib/3.12"' for _ in range(12)),
                  "Traceback (most recent call last):", '  File "/app/bot.py", line 88, in on_message',
                  "    reply = await llm.answer(message)", "TimeoutError: the model took longer than 90 s"]},
         {"t": now - 26 * 3600, "level": "boot", "title": "Pi restarted", "service": None,
@@ -213,7 +213,6 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/state":
             return self._send(state(self.trouble))
         if path.endswith("/history"):
-            from urllib.parse import parse_qs
             name = path.split("/")[3]
             rng = parse_qs(urlparse(self.path).query).get("range", ["24h"])[0]
             return self._send(service_history(name, rng, self.trouble))

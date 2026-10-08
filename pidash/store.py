@@ -6,6 +6,7 @@ import os
 import threading
 import time
 from collections import deque
+from contextlib import contextmanager
 
 from . import config
 
@@ -13,7 +14,8 @@ EVENTS = config.STATE_DIR / "events.jsonl"
 SAMPLES = config.STATE_DIR / "samples.jsonl"
 STATE = config.STATE_DIR / "state.json"
 
-_lock = threading.Lock()
+_lock = threading.Lock()         # the .jsonl files
+_state_lock = threading.RLock()  # state.json: held from load to save, so threads don't undo each other's changes
 
 
 def _read_jsonl(path, since=0.0):
@@ -106,8 +108,8 @@ def samples(since):
 def prune():
     cutoff = time.time() - config.KEEP_DAYS * 86400
     for path in (EVENTS, SAMPLES):
-        rows = _read_jsonl(path, cutoff)
-        with _lock:
+        with _lock:  # read under the lock too, or a row appended meanwhile would be lost
+            rows = _read_jsonl(path, cutoff)
             tmp = path.with_suffix(".tmp")
             tmp.write_text("".join(json.dumps(r, separators=(",", ":")) + "\n" for r in rows))
             tmp.replace(path)
@@ -120,15 +122,23 @@ def load_state() -> dict:
         return {}
 
 
-def save_state(state: dict):
-    with _lock:
-        tmp = STATE.with_suffix(".tmp")
-        tmp.write_text(json.dumps(state, indent=1))
-        tmp.replace(STATE)
+@contextmanager
+def edit_state():
+    """Load the state, let the caller change it, and save it, as one step:
+        with store.edit_state() as state:
+            state.setdefault("stopped", []).append(name)"""
+    with _state_lock:
+        state = load_state()
+        before = json.dumps(state, indent=1)
+        yield state
+        after = json.dumps(state, indent=1)
+        if after != before:  # spare the SD card the writes that change nothing
+            tmp = STATE.with_suffix(".tmp")
+            tmp.write_text(after)
+            tmp.replace(STATE)
 
 
 def update_state(**changes):
-    state = load_state()
-    state.update(changes)
-    save_state(state)
+    with edit_state() as state:
+        state.update(changes)
     return state

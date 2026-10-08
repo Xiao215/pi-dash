@@ -130,6 +130,19 @@ class History(unittest.TestCase):
         store.update_state(muted_until=5)
         self.assertEqual(store.load_state(), {"stopped": ["a"], "muted_until": 5})
 
+    def test_threads_changing_the_state_dont_undo_each_other(self):
+        import threading
+
+        def bump(key):
+            for _ in range(50):
+                with store.edit_state() as state:
+                    state[key] = state.get(key, 0) + 1
+        threads = [threading.Thread(target=bump, args=(k,)) for k in ("a", "b", "a", "b")]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(store.load_state(), {"a": 100, "b": 100})
 
     def test_sample_cache_follows_appends_and_rewrites(self):
         store.add_sample({"a": "up"})
@@ -252,7 +265,22 @@ class PruneImages(unittest.TestCase):
         run.assert_not_called()
 
 
+class Commands(unittest.TestCase):
+    def test_warnings_on_stderr_stay_out_of_parsed_output(self):
+        self.assertEqual(services.run(["/bin/sh", "-c", "echo ok; echo warning >&2"]), (0, "ok\n"))
+        self.assertEqual(services.run(["/bin/sh", "-c", "echo out; echo broke >&2; exit 3"]), (3, "out\nbroke\n"))
+        self.assertEqual(services.run(["/nonexistent/command"])[0], 1)
+
+
 class Messages(unittest.TestCase):
+    def test_rate_limit_without_json_is_waited_out(self):
+        import io
+        import urllib.error
+        html = urllib.error.HTTPError("u", 429, "Too Many Requests", {}, io.BytesIO(b"<html>1015</html>"))
+        self.assertEqual(notify._retry_after(html), 5.0)
+        discord = urllib.error.HTTPError("u", 429, "Too Many Requests", {}, io.BytesIO(b'{"retry_after": 1.5}'))
+        self.assertEqual(notify._retry_after(discord), 1.5)
+
     def test_red_alerts_ping(self):
         body = notify.payload(("error", "x crashed", "why", "x", [], ["a", "b"]))
         self.assertEqual(body["content"], "<@42>")
@@ -318,10 +346,10 @@ raspi-firmware/stable 1:1.20250915-1 arm64 [upgradable from: 1:1.20250430-1]
         self.assertEqual(system.parse_upgradable(""), [])
 
     def test_durations(self):
-        self.assertEqual(watch._ago(30), "30 s")
-        self.assertEqual(watch._ago(600), "10 min")
-        self.assertEqual(watch._ago(7300), "2 h 1 min")
-        self.assertEqual(watch._ago(3 * 86400), "3 days")
+        self.assertEqual(notify.ago(30), "30 s")
+        self.assertEqual(notify.ago(600), "10 min")
+        self.assertEqual(notify.ago(7300), "2 h 1 min")
+        self.assertEqual(notify.ago(3 * 86400), "3 days")
 
     def test_alert_waits_while_a_service_settles(self):
         now = 1_000_000
@@ -476,6 +504,7 @@ class HttpWithPassword(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.httpd.shutdown()
+        cls.httpd.server_close()
         config.PASSWORD_HASH = cls.saved
 
     def request(self, path, method="GET", body=None, cookie=None, relayed=True):
@@ -492,7 +521,8 @@ class HttpWithPassword(unittest.TestCase):
             with urllib.request.urlopen(req, timeout=10) as r:
                 return r.status, r.read().decode(), r.headers
         except urllib.error.HTTPError as e:
-            return e.code, e.read().decode(), e.headers
+            with e:
+                return e.code, e.read().decode(), e.headers
 
     def test_signed_out_sees_only_the_sign_in_page(self):
         code, html, _ = self.request("/")
@@ -524,6 +554,7 @@ class HttpWithPassword(unittest.TestCase):
                                      headers={"Content-Type": "application/json", "X-Forwarded-For": "100.64.0.6"})
         with self.assertRaises(urllib.error.HTTPError) as e:
             urllib.request.urlopen(req, timeout=10)
+        e.exception.close()
         self.assertEqual(e.exception.code, 403)
 
     def test_page_links_carry_the_version(self):
@@ -544,6 +575,29 @@ class HttpWithPassword(unittest.TestCase):
 
     def test_curl_on_the_server_itself_needs_no_password(self):
         self.assertEqual(self.request("/api/jobs/1", relayed=False)[0], 404)
+
+    def test_bad_input_gets_an_answer(self):
+        services.jobs["7"] = {"id": "7", "service": "a", "action": "restart", "lines": ["$ x"], "done": True, "ok": True}
+        try:
+            self.assertEqual(self.request("/api/jobs/7?from=x", relayed=False)[0], 400)
+            self.assertEqual(json.loads(self.request("/api/jobs/7?from=0", relayed=False)[1])["total"], 1)
+        finally:
+            services.jobs.pop("7")
+        self.assertEqual(self.request("/api/mute", "POST", {"hours": "soon"}, relayed=False)[0], 400)
+        self.assertEqual(self.request("/api/mute", "POST", [], relayed=False)[0], 200)  # not an object: no hours, unmute
+
+    def test_a_broken_registry_keeps_the_services_it_had(self):
+        Path(config.REGISTRY).write_text(json.dumps({"services": [{"name": "a", "kind": "systemd", "unit": "a.service"}]}))
+        try:
+            watch.reload_services()
+            Path(config.REGISTRY).write_text('{"services": [')
+            code, body, _ = self.request("/api/reload", "POST", {}, relayed=False)
+            self.assertEqual(code, 400)
+            self.assertIn(str(config.REGISTRY), json.loads(body)["error"])
+            self.assertEqual([s.name for s in watch.services_list()], ["a"])
+        finally:
+            Path(config.REGISTRY).unlink()
+            watch.reload_services()
 
     def test_ping_from_cron_on_the_server(self):
         import urllib.request
