@@ -7,6 +7,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from collections import namedtuple
 from datetime import datetime
 
 from . import config, store
@@ -25,12 +26,17 @@ STYLE = {  # level -> (emoji, embed colour)
 
 _outbox: queue.Queue = queue.Queue()
 
+# One alert on its way to Discord. `at` is time.monotonic() when it happened: a Pi that starts without internet
+# runs on the last time it saved until it reaches a time server, so the wall clock is only read when sending.
+# Alerts with the same `group` (the title unless given) are sent once when they piled up while offline.
+Alert = namedtuple("Alert", "level title detail service fields log_lines at group repeats", defaults=(None, None, 0))
 
-def alert(level, title, detail="", service=None, fields=None, log_lines=None, discord=True):
+
+def alert(level, title, detail="", service=None, fields=None, log_lines=None, discord=True, group=None):
     """Record an event and (unless discord=False) post it to Discord."""
     store.add_event(level, title, detail, service, log_lines)
     if discord and not muted():
-        _outbox.put((level, title, detail, service, fields or [], log_lines or []))
+        _outbox.put(Alert(level, title, detail, service, fields or [], log_lines or [], time.monotonic(), group))
 
 
 def ago(seconds) -> str:
@@ -45,13 +51,26 @@ def ago(seconds) -> str:
     return f"{seconds // 86400} days"
 
 
+def when(t) -> str:
+    """A moment in alert text. Discord shows it in the reader's own time zone, with the date when it's not today."""
+    return f"<t:{int(t)}:{'t' if time.time() - t < 20 * 3600 else 'f'}>"
+
+
+def wall(at) -> float:
+    """The wall-clock time of a time.monotonic() reading."""
+    return time.time() - (time.monotonic() - at)
+
+
 def muted() -> bool:
     return store.load_state().get("muted_until", 0) > time.time()
 
 
-def _embed(level, title, detail, service, fields, log_lines):
+def _embed(item: Alert):
+    level, title, detail, service, fields, log_lines, at = item[:7]
     emoji, colour = STYLE.get(level, STYLE["info"])
     description = detail
+    if item.repeats:
+        description += f"\n\n+{item.repeats} more like this, held while Discord couldn't be reached."
     if log_lines:
         tail = "\n".join(log_lines)[-1500:]
         description += f"\n```\n{tail.replace('```', '`​``')}\n```"
@@ -59,7 +78,7 @@ def _embed(level, title, detail, service, fields, log_lines):
         "title": f"{emoji} {title}"[:256],
         "description": description[:4000],
         "color": colour,
-        "timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "timestamp": datetime.fromtimestamp(wall(at) if at else time.time()).astimezone().isoformat(timespec="seconds"),
         "footer": {"text": config.HOSTNAME + (f" · {service}" if service else "")},
     }
     if fields:
@@ -103,25 +122,56 @@ def _retry_after(e: urllib.error.HTTPError) -> float:
 
 
 def payload(item, ping_user=None) -> dict:
+    item = Alert(*item)
     ping_user = config.PING_USER if ping_user is None else ping_user
-    body = {"username": config.HOSTNAME, "embeds": [_embed(*item)], "allowed_mentions": {"parse": []}}
-    if item[0] == "error" and ping_user:  # mentions inside embeds don't ping, so put it in content
+    body = {"username": config.HOSTNAME, "embeds": [_embed(item)], "allowed_mentions": {"parse": []}}
+    if item.level == "error" and ping_user:  # mentions inside embeds don't ping, so put it in content
         body["content"] = f"<@{ping_user}>"
         body["allowed_mentions"] = {"users": [ping_user]}
     return body
 
 
-def _sender():
+def collapse(held: list[Alert]) -> list[Alert]:
+    """Alerts that piled up while Discord couldn't be reached: one per group, in the order the groups began,
+    each the latest of its group (so "keeps crashing" says how many), counting the ones it stands for."""
+    groups: dict = {}  # (service, group) -> [latest alert, how many others it stands for]
+    for item in held:
+        g = groups.get((item.service, item.group or item.title))
+        if g:
+            g[0], g[1] = item, g[1] + 1 + item.repeats
+        else:
+            groups[(item.service, item.group or item.title)] = [item, item.repeats]
+    return [item._replace(repeats=n) for item, n in groups.values()]
+
+
+def _send(item) -> bool:
+    """Post one alert. False while Discord can't be reached; an alert Discord can't take is dropped."""
+    try:
+        return _post(payload(item))
+    except Exception:  # noqa: BLE001 - drop this one alert rather than stop sending
+        log.exception("sending an alert failed")
+        return True
+
+
+def _drain() -> list:
+    items = []
     while True:
-        item = _outbox.get()
         try:
-            sent = _post(payload(item))
-        except Exception:  # noqa: BLE001 - drop this one alert rather than stop sending
-            log.exception("sending an alert failed")
-            continue
-        if not sent:
+            items.append(_outbox.get_nowait())
+        except queue.Empty:
+            return items
+
+
+def _sender():
+    held: list[Alert] = []  # couldn't be sent yet, oldest first
+    while True:
+        if held:
             time.sleep(60)
-            _outbox.put(item)  # keep it until the network comes back
+            held = collapse(held + _drain())
+        else:
+            held = [_outbox.get()]
+        while held and _send(held[0]):
+            held.pop(0)
 
 
 def start():

@@ -14,14 +14,14 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from . import config, scheduled, services, store, system
-from .notify import ago, alert
+from .notify import ago, alert, wall, when
 
 log = logging.getLogger(__name__)
 
 _services = {s.name: s for s in config.load_services()}
 _last_error_alert: dict[str, float] = {}
 _suppressed: dict[str, int] = {}
-_last_crash: dict[str, float] = {}
+_last_crash: dict[str, tuple[float, bool]] = {}  # service -> (when its last crash alert went out, was it "keeps crashing")
 _alerted_down: set[str] = set()
 _bad_streak: dict[str, int] = {}
 _last_tick = time.time()  # when the sampler last finished a round; the heartbeat only goes out while it keeps going
@@ -107,15 +107,18 @@ def _crashed(label, why, svc):
     with store.edit_state() as state:
         crashes = state.setdefault("crashes", {})
         recent = crashes[label] = [t for t in crashes.get(label, []) if now - t < 600] + [now]
-    if now - _last_crash.get(label, 0) < 600 and len(recent) < 4:
+    last, kept = _last_crash.get(label, (0, False))
+    keeps = len(recent) >= 4
+    if now - last < 600 and (kept or not keeps):  # one alert, then one more if it turns into a loop, per 10 minutes
         store.add_event("error", f"{label} crashed again", why, label)
         return
-    _last_crash[label] = now
+    _last_crash[label] = (now, keeps)
     lines = services.recent_logs(svc, 20) if svc else []
-    if len(recent) >= 4:
-        alert("error", f"{label} keeps crashing", f"{len(recent)} crashes in 10 minutes. {why}", label, log_lines=lines)
+    if keeps:
+        alert("error", f"{label} keeps crashing", f"{len(recent)} crashes in 10 minutes. {why}", label, log_lines=lines,
+              group="crash")
     else:
-        alert("error", f"{label} crashed", f"{why} It restarts automatically.", label, log_lines=lines)
+        alert("error", f"{label} crashed", f"{why} It restarts automatically.", label, log_lines=lines, group="crash")
     _alerted_down.add(label)
 
 
@@ -225,17 +228,17 @@ def _journal_entry(entry, pending, lock):
 def _sampler():
     global _last_tick
     net_prev = (system.net_totals(), time.monotonic())
-    offline_since = None
+    outage = None
     while True:
         try:
-            net_prev, offline_since = _sample_round(net_prev, offline_since)
+            net_prev, outage = _sample_round(net_prev, outage)
             _last_tick = time.time()
         except Exception:  # noqa: BLE001 - try again next minute; the heartbeat stops if this keeps failing
             log.exception("sampling failed")
         time.sleep(config.SAMPLE_EVERY)
 
 
-def _sample_round(net_prev, offline_since):
+def _sample_round(net_prev, outage):
     states, res = {}, {}
     for svc in list(_services.values()):
         try:
@@ -252,7 +255,7 @@ def _sample_round(net_prev, offline_since):
                               "mem": round(100 - 100 * snap["mem"]["available"] / snap["mem"]["total"], 1),
                               "rx": round(rx) if rx is not None else None, "tx": round(tx) if tx is not None else None,
                               "online": online}, res)
-    return (net, now), _internet(online, offline_since)
+    return (net, now), _internet(online, outage)
 
 
 def _sample_service(svc):
@@ -284,14 +287,30 @@ def _sample_service(svc):
     return st, sample
 
 
-def _internet(online, offline_since):
-    """Note outages of the Pi's internet. Discord can't be reached meanwhile, so it hears afterwards."""
-    now = time.time()
+def _internet(online, outage):
+    """Note outages of the Pi's internet. Discord can't be reached meanwhile, so it hears afterwards.
+    An outage is timed with time.monotonic(): a Pi that starts without internet runs on the last time it saved
+    until it reaches a time server, so the wall clock is read only once that has happened."""
     if not online:
-        return offline_since or now
-    if offline_since and now - offline_since >= 120:
-        alert("warn", "Internet was down", f"For about {ago(now - offline_since)}, from {datetime.fromtimestamp(offline_since):%H:%M} "
-              f"to {datetime.now():%H:%M}. Alerts from that time arrive late.")
+        if outage:
+            outage.pop("end", None)  # gone again before it was reported: still the same outage
+            return outage
+        return {"start": time.monotonic(), "uptime": system.uptime()}
+    if not outage:
+        return None
+    outage.setdefault("end", time.monotonic())
+    lasted = outage["end"] - outage["start"]
+    if lasted < 120:
+        return None
+    if not _clock_synced():
+        return outage  # back, but the times would be wrong yet: try again next round
+    end = when(wall(outage["end"]))
+    if outage["uptime"] < 300:  # since it started: the restart alert says how long the Pi itself was off
+        alert("warn", "No internet after the restart", f"It took {ago(lasted)} to get online, until {end}. "
+              "Alerts from that time arrive late.")
+    else:
+        alert("warn", "Internet was down", f"For about {ago(lasted)}, from {when(wall(outage['start']))} "
+              f"to {end}. Alerts from that time arrive late.")
     return None
 
 
@@ -596,7 +615,7 @@ def _announce_boot():
     else:
         reason, last_t = _boot_reason()
         down = _downtime(last_t) if last_t else None
-        off = f"\nWas down for about {ago(down)}." if down is not None else ""
+        off = f"\nIt was off for about {ago(down)}, from {when(last_t)}." if down is not None else ""
         level = "error" if reason.startswith("unexpected") else "boot"
         alert(level, "Pi restarted", f"Reason: {reason}.{off}\n\n{summary}")
     store.update_state(boot_id=current, planned=None)  # only once announced, so a pi-dash restart mid-wait still announces
