@@ -22,6 +22,7 @@ STYLE = {  # level -> (emoji, embed colour)
     "info": ("ℹ️", 0x8B8D98),
     "digest": ("☀️", 0x3E63DD),
     "update": ("⬆️", 0x3E63DD),
+    "agent": ("✨", 0x3E63DD),  # a command the assistant ran with your OK
 }
 
 _outbox: queue.Queue = queue.Queue()

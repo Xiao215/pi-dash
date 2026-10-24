@@ -55,6 +55,15 @@ DISK_WARN = float(_get("thresholds", "disk_percent", 80))
 TEMP_WARN = float(_get("thresholds", "temperature_c", 75))
 MEM_FREE_WARN = float(_get("thresholds", "memory_free_percent", 10))
 
+# The assistant: chats with Claude that look around the Pi and wait for your OK before changing anything.
+ASSISTANT = bool(_get("assistant", "enabled", False))
+ASSISTANT_KEY = _get("assistant", "api_key", "") or os.environ.get("ANTHROPIC_API_KEY", "")
+# Another server that speaks Anthropic's API instead of Anthropic itself, e.g. cli-bridge on your Claude plan.
+ASSISTANT_BASE_URL = _get("assistant", "base_url", "")
+ASSISTANT_MODEL = _get("assistant", "model", "claude-opus-5-5")
+ASSISTANT_EFFORT = _get("assistant", "effort", "medium")
+ASSISTANT_BUDGET = float(_get("assistant", "daily_budget_usd", 3))  # dollars per day; new turns wait past it
+
 STATE_DIR = Path(os.environ.get("STATE_DIRECTORY", "~/.local/state/pi-dash")).expanduser()
 STATE_DIR.mkdir(parents=True, exist_ok=True)
 

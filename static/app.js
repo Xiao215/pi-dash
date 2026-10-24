@@ -6,7 +6,7 @@ const icon = (name) => `<svg class="i" aria-hidden="true"><use href="#i-${name}"
 
 const STATE_LABEL = { up: "Running", unhealthy: "Unhealthy", starting: "Starting", down: "Down", stopped: "Stopped", missing: "Not created", unknown: "Unknown" };
 const KIND_LABEL = { compose: "Docker", "systemd-user": "systemd", systemd: "systemd" };
-const LEVEL_ICON = { error: "x-circle", warn: "alert", ok: "check", boot: "restart", digest: "sun", info: "info", update: "update" };
+const LEVEL_ICON = { error: "x-circle", warn: "alert", ok: "check", boot: "restart", digest: "sun", info: "info", update: "update", agent: "sparkle" };
 const ALERT_LEVELS = new Set(["error", "warn", "ok", "boot", "update"]);
 const RUNNING = new Set(["up", "unhealthy", "starting"]);
 
@@ -672,7 +672,8 @@ function eventRow(e, existing, now, fresh, nested = false) {
         <span class="ev-body">${body}</span>
         <span class="ev-when"><span class="t"></span>${expandable ? icon("chevron") : ""}</span>
       </${tag}>
-      ${expandable ? `<div class="ev-log"><div><pre>${(e.log && e.log.length ? e.log : text.split("\n")).map((l) => `<span>${esc(l)}</span>`).join("")}</pre></div></div>` : ""}`;
+      ${expandable ? `<div class="ev-log"><div><pre>${(e.log && e.log.length ? e.log : text.split("\n")).map((l) => `<span>${esc(l)}</span>`).join("")}</pre>${!nested && ["error", "warn"].includes(e.level) ? `<div class="ev-ask"><button class="btn" type="button" data-ask-why>${icon("sparkle")}Ask why this happened</button></div>` : ""}</div></div>` : ""}`;
+    li._event = e;
     if (openEvents.has(key)) li.classList.add("open");
   }
   setWhen(li, e.t, now);
@@ -829,8 +830,9 @@ function setOffline(off) {
 // ---- refresh loop ---------------------------------------------------------------------
 
 function render(data) {
-  if (PAGE_VERSION && data.version && data.version !== PAGE_VERSION && !$("#drawer").classList.contains("open") && !$("dialog[open]")) {
-    location.reload();  // load the new page; waits while logs or a dialog are open
+  if (PAGE_VERSION && data.version && data.version !== PAGE_VERSION && !$("#drawer").classList.contains("open") && !$("dialog[open]")
+      && !agentOpen()) {
+    location.reload();  // load the new page; waits while logs, the assistant or a dialog are open
     return;
   }
   const firstRender = !last;
@@ -1037,7 +1039,7 @@ $("#log-search").addEventListener("input", (e) => {
 $("#wrap").onchange = (e) => log.classList.toggle("wrap", e.target.checked);
 $("#errors-only").onchange = (e) => log.classList.toggle("errors-only", e.target.checked);
 $("#drawer-close").onclick = closeDrawer;
-$("#scrim").onclick = closeDrawer;
+$("#scrim").onclick = () => (agentOpen() ? closeAgent() : closeDrawer());
 
 // ---- dialogs, menus, actions ------------------------------------------------------
 
@@ -1145,6 +1147,7 @@ document.addEventListener("click", (e) => {
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   if ($(".menu.open")) closeMenus();
+  else if (agentOpen() && !$("dialog[open]")) closeAgent();
   else if ($("#drawer").classList.contains("open")) closeDrawer();
   else if (page && !$("dialog[open]")) location.hash = "";
 });
@@ -1531,6 +1534,407 @@ function wifiOfflineText() {
   return `<span class="spin small"></span><span class="grow">Switching Wi-Fi to ${esc(wifiWatch.ssid)}. Waiting for the Pi to come back…${hint}</span>`;
 }
 
+// ---- the assistant: Claude looks around the Pi on its own and asks before changing anything ---------------
+
+const agentEl = $("#agent"), chatEl = $("#chat"), askInput = $("#ask-input");
+let agentInfo = null;        // GET /api/agent: on, problem, chats, spent_today, budget, user, host
+let chat = null;             // the open chat: {id, title, status, cost, seq, events (by number)}
+let chatSource = null;       // its event stream
+let chatGen = 0;             // bumped per chat shown: answers for one that's no longer open are dropped
+let chatDown = 0;            // when the stream dropped (0: connected)
+let reconnected = "";        // shown on a running card after the connection came back
+let askContext = null;       // the Activity entry a new chat is about
+let editing = null, editText = "";  // the card whose command is being edited, and the edit so far
+const openSteps = new Set(), openOutput = new Set();  // "Looked at" boxes and outputs left open
+const RISKY = /connection|Restarts|off|secrets/;
+
+async function loadAgent() {
+  try { agentInfo = await api("/api/agent"); } catch { agentInfo = null; }  // refused off Tailscale: no assistant
+  const on = Boolean(agentInfo?.on);
+  $("#ask-btn").hidden = !on;
+  document.body.classList.toggle("has-assistant", on);
+}
+
+const agentOpen = () => agentEl.classList.contains("open");
+
+async function openAgent({ chatId = null, context = null, ask = "" } = {}) {
+  closeMenus();
+  if ($("#drawer").classList.contains("open")) closeDrawer();
+  agentEl.classList.add("open");
+  agentEl.setAttribute("aria-hidden", "false");
+  $("#scrim").classList.add("open");
+  document.body.style.overflow = "hidden";
+  await loadAgent();
+  if (chatId) showChat(chatId);
+  else showHome(context);
+  if (ask) { askInput.value = ask; submitAsk(); }
+}
+function closeAgent() {
+  stopChatStream();
+  chatGen++;
+  agentEl.classList.remove("open");
+  agentEl.setAttribute("aria-hidden", "true");
+  $("#scrim").classList.remove("open");
+  document.body.style.overflow = "";
+}
+function stopChatStream() {
+  if (chatSource) { chatSource.close(); chatSource = null; }
+}
+
+function agentSub(text, dot = "off") {
+  $("#agent-sub-text").textContent = text;
+  cls($("#agent-sub .live-dot"), `live-dot ${dot}`);
+}
+const whoText = () => (agentInfo?.host ? `${agentInfo.host} · runs as ${agentInfo.user}` : "");
+const STATUS_TEXT = { thinking: ["Thinking…", "busy"], running: ["Running a command…", "busy"], waiting: ["Waiting for you", "busy"] };
+
+/** A new chat: the recent ones to go back to, and the box to type in. */
+function showHome(context = null) {
+  stopChatStream();
+  chatGen++;
+  chat = null; editing = null; askContext = context;
+  agentSub(whoText());
+  const info = agentInfo || {};
+  let html = "";
+  if (info.problem) html += `<div class="note warn">${icon("alert")}<span>${esc(info.problem)}</span></div>`;
+  if (info.chats?.length) {
+    html += `<div><p class="recent-label">Recent</p><div class="recent">${info.chats.slice(0, 12).map((c) =>
+      `<div class="recent-row"><button type="button" data-chat="${esc(c.id)}"><span>${esc(c.title)}</span><span class="t">${esc(ago(c.t))}</span></button><button type="button" class="recent-del" data-del="${esc(c.id)}" title="Remove" aria-label="Remove this chat">${icon("x")}</button></div>`).join("")}</div></div>`;
+  }
+  chatEl._blocks = null;
+  clear(chatEl);
+  chatEl.innerHTML = html;
+  renderContext();
+  syncComposer();
+  setTimeout(() => askInput.focus(), 50);
+}
+
+function showChat(id) {
+  stopChatStream();
+  const gen = ++chatGen;
+  chat = { id, title: "", status: "", cost: 0, seq: 0, events: [] };
+  editing = null; askContext = null; reconnected = "";
+  renderContext();
+  clear(chatEl);
+  chatEl._blocks = new Map();
+  chatEl._stick = true;
+  connectChat(gen);
+}
+
+function connectChat(gen) {
+  stopChatStream();
+  const src = new EventSource(`/api/agent/chats/${encodeURIComponent(chat.id)}/stream?since=${chat.seq}`);
+  chatSource = src;
+  src.onmessage = (m) => {
+    if (gen !== chatGen) return;
+    if (chatDown) {
+      const secs = Math.round((Date.now() - chatDown) / 1000);
+      reconnected = `Lost the connection for ${secs} s. Reconnected; still running.`;
+      chatDown = 0;
+    }
+    mergeChat(JSON.parse(m.data));
+  };
+  src.onerror = () => {  // reconnect ourselves, so it asks only for what changed since
+    if (gen !== chatGen) return;
+    src.close();
+    if (!chatDown) chatDown = Date.now();
+    agentSub("Reconnecting…", "bad");
+    setTimeout(() => { if (gen === chatGen && agentOpen()) connectChat(gen); }, 2000);
+  };
+}
+
+function mergeChat(d) {
+  Object.assign(chat, { title: d.title, status: d.status, cost: d.cost, tokens: d.tokens, seq: Math.max(chat.seq, d.seq) });
+  for (const e of d.events) chat.events[e.n] = e;
+  if (!chat.events.some((e) => e?.type === "ask" && e.state === "running")) reconnected = "";
+  const [text, dot] = STATUS_TEXT[chat.status] || [whoText(), "off"];
+  agentSub(text, dot);
+  renderChat();
+  syncComposer();
+}
+
+/** The little Markdown the assistant writes: paragraphs, lists, **bold**, `code`, fenced code. Escaped first. */
+function md(text) {
+  // Code spans first (stars inside them are literal), then bold, which may wrap code: **`uptime` worked**.
+  const inline = (s) => {
+    const codes = [];
+    s = s.replace(/`([^`]+)`/g, (_, c) => `\u0000${codes.push(c) - 1}\u0000`);
+    return s.replace(/\*\*(.+?)\*\*/g, "<b>$1</b>").replace(/\u0000(\d+)\u0000/g, (_, i) => `<code>${codes[i]}</code>`);
+  };
+  const out = [];
+  let para = [], list = null, fence = null;
+  const flush = () => {
+    if (para.length) out.push(`<p>${para.map(inline).join("<br>")}</p>`);
+    if (list) out.push(`<${list.tag}>${list.items.map((i) => `<li>${inline(i)}</li>`).join("")}</${list.tag}>`);
+    para = []; list = null;
+  };
+  for (const line of esc(text).split("\n")) {
+    if (fence) {
+      if (/^\s*```/.test(line)) { out.push(`<pre>${fence.join("\n")}</pre>`); fence = null; } else fence.push(line);
+      continue;
+    }
+    if (/^\s*```/.test(line)) { flush(); fence = []; continue; }
+    const item = line.match(/^\s*(?:(\d+)[.)]|[-*•])\s+(.*)$/);
+    if (item) {
+      const tag = item[1] ? "ol" : "ul";
+      if (para.length || (list && list.tag !== tag)) flush();
+      list ??= { tag, items: [] };
+      list.items.push(item[2]);
+    } else if (!line.trim()) flush();
+    else { if (list) flush(); para.push(line); }
+  }
+  if (fence) out.push(`<pre>${fence.join("\n")}</pre>`);
+  flush();
+  return out.join("");
+}
+
+const mmss = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+
+function stepsHtml(items, key) {
+  const running = items.some((s) => s.status === "running");
+  const n = items.length;
+  return `<details class="steps" data-steps="${key}"${openSteps.has(key) ? " open" : ""}>
+    <summary>${icon("search")}<span>${running ? "Looking…" : "Looked at"} <b>${n} thing${n > 1 ? "s" : ""}</b></span>${icon("chevron").replace('class="i"', 'class="i chev"')}</summary>
+    ${items.map((s) => `<div class="step"><div class="step-row ${s.status}">${icon(s.status === "running" ? "clock" : s.status === "error" ? "x-circle" : "check")}<code>${esc(s.label)}</code><span class="t">${esc(hm(s.t))}</span></div>${s.output ? `<pre class="out">${esc(s.output)}</pre>` : ""}</div>`).join("")}
+  </details>`;
+}
+
+function askHtml(e) {
+  const risky = e.labels.some((l) => RISKY.test(l));
+  const badges = e.labels.map((l) => `<span class="badge ${RISKY.test(l) ? "risk" : "change"}">${esc(l)}</span>`).join("");
+  const head = (right) => `<div class="ask-head"><h4>${esc(e.title || "Run this?")}</h4>${badges}${right}</div>`;
+  const cmd = e.tool !== "run_command" ? ""
+    : editing === e.call ? `<textarea class="cmd" id="edit-cmd" spellcheck="false" autocapitalize="off">${esc(editText)}</textarea>`
+    : `<div class="cmd">${esc(e.command)}</div>`;
+  const edited = e.edited_from ? `<p class="edited">You edited it. It suggested <code>${esc(e.edited_from)}</code></p>` : "";
+  const lines = (e.lines || []).map(esc).join("\n");
+  const card = (extra, body) => `<div class="ask-card${extra}" data-call="${esc(e.call)}">${body}</div>`;
+  if (e.state === "waiting") {
+    const buttons = editing === e.call
+      ? `<button class="btn" type="button" data-ask="cancel-edit">Cancel</button><button class="btn accent" type="button" data-ask="run">${icon("play")}Run this</button>`
+      : `${e.tool === "run_command" ? `<button class="btn quiet" type="button" data-ask="edit">Edit</button>` : ""}<button class="btn" type="button" data-ask="skip">Not now</button><button class="btn accent" type="button" data-ask="run">${icon("play")}Run</button>`;
+    return card(risky ? " risky" : "", `${head(`<span class="wait"><span class="live-dot busy"></span>Waiting for you</span>`)}
+      ${e.why ? `<p class="ask-why">${esc(e.why)}</p>` : ""}${cmd}
+      ${e.effects.length ? `<ul class="effects">${e.effects.map((x) => `<li>${icon("info")}<span>${esc(x)}</span></li>`).join("")}</ul>` : ""}
+      <div class="ask-foot"><span class="grow">Runs as ${esc(agentInfo?.user || "you")}. Recorded in Activity.</span>${buttons}</div>`);
+  }
+  if (e.state === "declined") {
+    return card(" settled", `${head("")}${cmd}<div class="result off">${icon("x-circle")}Not run</div>`);
+  }
+  if (e.state === "running") {
+    return card(risky ? " risky" : "", `${head(`<span class="wait"><span class="live-dot busy"></span>Running · ${mmss(Date.now() / 1000 - (e.started || Date.now() / 1000))}</span>`)}
+      ${cmd}${edited}<pre class="run-log">${lines}</pre>
+      ${reconnected ? `<p class="edited">${icon("check")} ${esc(reconnected)}</p>` : ""}
+      <div class="ask-foot"><span class="grow">You approved this at ${esc(hm(e.decided))}.</span><button class="btn" type="button" data-ask="stop">${icon("stop")}Stop</button></div>`);
+  }
+  const took = dur((e.finished || 0) - (e.started || 0));
+  const result = e.state === "done" ? `<div class="result ok">${icon("check")}Done in ${took}</div>`
+    : e.state === "failed" ? `<div class="result bad">${icon("x-circle")}Failed${e.exit != null ? ` with exit code ${e.exit}` : ""} after ${took}</div>`
+    : `<div class="result off">${icon("stop")}Stopped after ${took}</div>`;
+  return card(" settled", `${head(`<span class="wait">You approved · ${esc(hm(e.decided))}</span>`)}${cmd}${edited}
+    ${lines ? `<details data-output="${esc(e.call)}"${openOutput.has(e.call) ? " open" : ""}><summary>${icon("logs")}Output (${e.lines.length} line${e.lines.length > 1 ? "s" : ""})</summary><pre class="run-log">${lines}</pre></details>`
+    : `<p class="edited">No output</p>`}${result}`);
+}
+
+const NOTE_ICON = { error: "x-circle", warn: "alert", info: "info" };
+
+function chatBlocks() {
+  const out = [];
+  let steps = null;
+  for (const e of chat.events) {
+    if (!e || e.gone || (e.type === "text" && !e.text)) continue;
+    if (e.type === "step") {
+      if (!steps) { steps = { key: `steps-${e.n}`, items: [] }; out.push(steps); }
+      steps.items.push(e);
+      continue;
+    }
+    steps = null;
+    out.push({ key: `e-${e.n}`, e });
+  }
+  for (const b of out) {
+    const e = b.e;
+    b.html = b.items ? stepsHtml(b.items, b.key)
+      : e.type === "user" ? `${e.about ? `<p class="you-about">${icon("sparkle")}About: ${esc(e.about)}</p>` : ""}<div class="you">${esc(e.text)}</div>`
+      : e.type === "text" ? `<div class="say${e.done ? "" : " typing"}">${md(e.text)}</div>`
+      : e.type === "flag" ? `<div class="note warn">${icon("alert")}<span>${esc(e.text)}</span></div>`
+      : e.type === "note" ? `<div class="note ${esc(e.level)}">${icon(NOTE_ICON[e.level] || "info")}<span>${esc(e.text)}</span></div>`
+      : e.type === "ask" ? askHtml(e) : "";
+  }
+  const lastText = out.length && out[out.length - 1].e?.type === "text" && !out[out.length - 1].e.done;
+  if (chat.status === "thinking" && !lastText) out.push({ key: "thinking", html: `<div class="thinking"><span class="live-dot busy"></span>Thinking…</div>` });
+  return out;
+}
+
+/** Keyed blocks, so only what changed is redrawn: open boxes stay open and an edit in progress survives. */
+function renderChat() {
+  if (!chat) return;
+  const atBottom = chatEl._stick || chatEl.scrollHeight - chatEl.scrollTop - chatEl.clientHeight < 80;
+  const blocks = chatEl._blocks;
+  const keep = new Set();
+  const place = placer(chatEl);
+  for (const b of chatBlocks()) {
+    let el = blocks.get(b.key);
+    if (!el) {
+      el = document.createElement("div");
+      el.className = "block";
+      el.dataset.key = b.key;
+      blocks.set(b.key, el);
+    }
+    put(el, b.html);
+    if (!el._shown) { el._shown = true; el.firstElementChild?.classList.add("appear"); }
+    keep.add(b.key);
+    place(el);
+  }
+  for (const [k, el] of blocks) if (!keep.has(k)) { el.remove(); blocks.delete(k); }
+  chatEl.querySelectorAll(".ask-card:not(.settled) .run-log").forEach((pre) => { pre.scrollTop = pre.scrollHeight; });
+  if (atBottom) chatEl.scrollTop = chatEl.scrollHeight;
+  chatEl._stick = false;
+  setCost();
+}
+
+function renderContext() {
+  put($("#agent-ctx"), askContext && !chat
+    ? `<span class="chip-ctx">${icon("sparkle")}<span>About: ${esc(askContext.title)}</span><button type="button" id="ctx-remove" title="Remove">${icon("x")}</button></span>` : "");
+}
+
+function setCost() {
+  const el = $("#agent-cost");
+  const k = (n) => (n >= 1000 ? `${Math.round(n / 1000)}k` : `${n || 0}`);
+  if (agentInfo && !agentInfo.metered) el.textContent = chat ? `This chat: ${k(chat.tokens)} tokens on your plan` : "On your Claude plan";
+  else el.textContent = chat ? `This chat ≈ $${(chat.cost || 0).toFixed(2)}`
+    : agentInfo ? `Today $${(agentInfo.spent_today || 0).toFixed(2)} of $${agentInfo.budget}` : "";
+}
+
+const chatBusy = () => chat && ["thinking", "running"].includes(chat.status);
+
+function syncComposer() {
+  const blocked = Boolean(agentInfo?.problem) && !chat;
+  askInput.disabled = blocked;
+  const stop = chatBusy() && !askInput.value.trim();
+  const b = $("#ask-send");
+  cls(b, stop ? "btn stop" : "btn accent");
+  put(b, icon(stop ? "stop" : "send"));
+  b.title = stop ? "Stop" : "Send";
+  b.disabled = blocked;
+  askInput.placeholder = chatBusy() ? "Working… you can still type" : chat ? "Reply…" : "Ask about the Pi, a service, an alert…";
+  setCost();
+}
+
+function autosize() {
+  askInput.style.height = "auto";
+  askInput.style.height = `${Math.min(askInput.scrollHeight, 140)}px`;
+}
+
+async function submitAsk() {
+  const text = askInput.value.trim();
+  if (!text) {
+    if (chatBusy()) await api(`/api/agent/chats/${chat.id}/stop`, { method: "POST" }).catch((e) => toast(e.message, true));
+    return;
+  }
+  askInput.value = "";
+  autosize();
+  syncComposer();
+  try {
+    if (chat) {
+      await api(`/api/agent/chats/${chat.id}/messages`, { method: "POST", body: JSON.stringify({ text }) });
+    } else {
+      const c = await api("/api/agent/chats", { method: "POST", body: JSON.stringify({ text, context: askContext }) });
+      showChat(c.id);
+      loadAgent();
+    }
+  } catch (e) {
+    toast(e.message, true);
+    askInput.value = text;
+    syncComposer();
+  }
+}
+
+async function decideAsk(call, run) {
+  const ask = chat.events.find((e) => e?.call === call && e.type === "ask");
+  const command = editing === call && run && editText.trim() !== ask.command ? editText.trim() : undefined;
+  chatEl.querySelectorAll(`[data-call="${CSS.escape(call)}"] button`).forEach((b) => { b.disabled = true; });
+  try {
+    await api(`/api/agent/chats/${chat.id}/decide`, { method: "POST", body: JSON.stringify({ call, run, command }) });
+    editing = null;
+  } catch (e) {
+    toast(e.message, true);
+    renderChat();
+  }
+}
+
+$("#composer").addEventListener("submit", (e) => { e.preventDefault(); submitAsk(); });
+askInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); submitAsk(); }
+});
+askInput.addEventListener("input", () => { autosize(); syncComposer(); });
+$("#ask-btn").onclick = () => openAgent();
+$("#agent-close").onclick = closeAgent;
+$("#agent-new").onclick = async () => { await loadAgent(); showHome(); };
+$("#agent-ctx").addEventListener("click", (e) => {
+  if (e.target.closest("#ctx-remove")) { askContext = null; renderContext(); askInput.focus(); }
+});
+
+chatEl.addEventListener("click", async (e) => {
+  const del = e.target.closest("[data-del]");
+  if (del) {
+    const row = del.closest(".recent-row");
+    row.hidden = true;
+    try {
+      await api(`/api/agent/chats/${del.dataset.del}/delete`, { method: "POST" });
+      row.remove();
+      agentInfo.chats = agentInfo.chats.filter((c) => c.id !== del.dataset.del);
+      if (!agentInfo.chats.length) showHome(askContext);
+    } catch (err) { row.hidden = false; toast(err.message, true); }
+    return;
+  }
+  const open = e.target.closest("[data-chat]");
+  if (open) return showChat(open.dataset.chat);
+  const b = e.target.closest("[data-ask]");
+  if (!b || !chat) return;
+  const call = b.closest("[data-call]").dataset.call;
+  const ev = chat.events.find((x) => x?.call === call && x.type === "ask");
+  const act = b.dataset.ask;
+  if (act === "run") decideAsk(call, true);
+  else if (act === "skip") decideAsk(call, false);
+  else if (act === "stop") api(`/api/agent/chats/${chat.id}/stop`, { method: "POST" }).catch((err) => toast(err.message, true));
+  else if (act === "edit") {
+    editing = call; editText = ev.command;
+    renderChat();
+    const ta = $("#edit-cmd");
+    ta.focus();
+    ta.setSelectionRange(ta.value.length, ta.value.length);
+  } else if (act === "cancel-edit") { editing = null; renderChat(); }
+});
+chatEl.addEventListener("input", (e) => { if (e.target.id === "edit-cmd") editText = e.target.value; });
+chatEl.addEventListener("toggle", (e) => {
+  const d = e.target;
+  for (const [attr, set] of [["steps", openSteps], ["output", openOutput]]) {
+    const key = d.dataset?.[attr];
+    if (key) d.open ? set.add(key) : set.delete(key);
+  }
+}, true);
+
+// The running time on a command's card.
+setInterval(() => {
+  if (agentOpen() && chat?.events.some((e) => e?.type === "ask" && e.state === "running")) renderChat();
+}, 1000);
+
+// "Ask why this happened" under a problem in Activity.
+document.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-ask-why]");
+  if (!b) return;
+  const ev = b.closest("li")._event;
+  const context = { title: ev.title, detail: ev.detail, service: ev.service, log: ev.log, when: new Date(ev.t * 1000).toLocaleString() };
+  openAgent({ context, ask: "Why did this happen?" });
+});
+
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "/" || e.metaKey || e.ctrlKey || e.altKey || agentOpen() || $("#ask-btn").hidden) return;
+  if (e.target.closest("input, textarea, select, [contenteditable]") || $("dialog[open]")) return;
+  e.preventDefault();
+  openAgent();
+});
+
 // ---- start ---------------------------------------------------------------------------
 
 buildStats();
@@ -1539,3 +1943,4 @@ $("#services").innerHTML = `<div class="svc skel-card" style="height:150px"></di
 document.querySelectorAll(".skel-card").forEach((c) => c.classList.add("skel"));
 route();
 refresh();
+loadAgent();

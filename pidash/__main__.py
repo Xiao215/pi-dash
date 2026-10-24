@@ -1,6 +1,6 @@
 import logging
 
-from . import notify, store, system, watch, web
+from . import agent, config, notify, store, system, watch, web
 
 
 def main():
@@ -9,6 +9,8 @@ def main():
     system.start()
     notify.start()
     watch.start()
+    if config.ASSISTANT:
+        agent.start()
     web.serve()
 
 

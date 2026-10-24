@@ -40,7 +40,7 @@ def _append(path, row):
 
 
 def add_event(level, title, detail="", service=None, log_lines=None):
-    """level: info | ok | warn | error | boot | digest"""
+    """level: info | ok | warn | error | boot | digest | update | agent"""
     row = {"t": time.time(), "level": level, "title": title, "detail": detail, "service": service}
     if log_lines:
         row["log"] = [l[:400] for l in log_lines[-30:]]

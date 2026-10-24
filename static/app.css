@@ -503,6 +503,130 @@ body.offline main { opacity: .55; filter: grayscale(.4); }
 @keyframes shake { 20%, 60% { transform: translateX(-6px); } 40%, 80% { transform: translateX(6px); } }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
 
+/* ---- the assistant ---- */
+.btn.ask { gap: 7px; padding: 0 12px 0 10px; }
+.btn.ask .i { color: var(--info); }
+.btn.ask kbd { font: 600 11px var(--mono); color: var(--faint); border: 1px solid var(--border); border-radius: 5px; padding: 0 5px; line-height: 17px; }
+
+.drawer.agent { width: min(600px, 100vw); }
+.agent .drawer-head { padding-bottom: 14px; }
+.agent-title { display: flex; align-items: center; gap: 8px; }
+.agent-title .i { color: var(--info); width: 18px; height: 18px; }
+#agent-sub { display: flex; align-items: center; gap: 6px; margin-top: 2px; }
+#agent-sub .live-dot.off { display: none; }
+.agent-head-btns { display: flex; gap: 4px; }
+
+.chat { flex: 1; overflow: auto; padding: 18px 20px 24px; display: flex; flex-direction: column; gap: 16px; background: var(--bg); overscroll-behavior: contain; outline: none; overflow-x: hidden; }
+.chat > *, .chat > .block > * { flex: none; }
+.chat > .block { display: contents; }
+.chat .appear { animation: appear .35s var(--ease) both; }
+
+/* a new chat: just the recent ones; the composer does the rest */
+.recent-label { font-size: 12px; font-weight: 650; color: var(--muted); margin: 0 0 4px 10px; }
+.recent { display: grid; gap: 2px; }
+.recent-row { display: flex; align-items: center; border-radius: 8px; min-width: 0; }
+.recent-row:hover { background: var(--hover); }
+.recent-row > [data-chat] { flex: 1; min-width: 0; }  /* lets a long title shrink to its ellipsis */
+.recent-row > [data-chat]:hover { background: none; }
+.recent .recent-del { width: 28px; height: 28px; padding: 0; justify-content: center; align-items: center; color: var(--faint); opacity: 0; flex: none; margin-right: 4px; }
+.recent-row:hover .recent-del, .recent .recent-del:focus-visible { opacity: 1; }
+.recent .recent-del:hover { color: var(--text); background: var(--surface-2); }
+.recent .recent-del .i { width: 14px; height: 14px; }
+@media (hover: none) { .recent .recent-del { opacity: 1; } }
+.recent button { display: flex; justify-content: space-between; gap: 12px; padding: 7px 10px; border: 0; background: none; border-radius: 8px; cursor: pointer; font-size: 13.5px; text-align: left; min-width: 0; }
+.recent button:hover { background: var(--hover); }
+.recent button span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.recent .t { color: var(--faint); white-space: nowrap; font-size: 12.5px; }
+
+.you { align-self: flex-end; max-width: 85%; background: var(--surface-2); border: 1px solid var(--border); padding: 9px 14px; border-radius: 16px 16px 4px 16px; font-size: 14.5px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.you-about { align-self: flex-end; margin-bottom: -10px; font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 5px; }
+.you-about .i { width: 12px; height: 12px; }
+.say { font-size: 14.5px; line-height: 1.55; display: grid; gap: 8px; overflow-wrap: anywhere; }
+.say p, .say ol, .say ul, .say pre { margin: 0; }
+.say ol, .say ul { padding-left: 20px; display: grid; gap: 4px; }
+.say code, .ask-card code { font: 12.5px var(--mono); background: var(--surface-2); padding: 1px 5px; border-radius: 5px; border: 1px solid var(--border); }
+.say pre { font: 12.5px/1.5 var(--mono); background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; white-space: pre-wrap; }
+.say.typing > :last-child::after { content: ""; display: inline-block; width: 7px; height: 14px; margin-left: 2px; background: var(--muted); vertical-align: -2px; animation: blink 1s steps(1) infinite; }
+.thinking { display: flex; align-items: center; gap: 8px; font-size: 13.5px; color: var(--muted); }
+
+/* "Looked at N things": the read-only steps, run without asking */
+.steps { border: 1px solid var(--border); border-radius: 12px; background: var(--surface); overflow: hidden; }
+.steps > summary { list-style: none; display: flex; align-items: center; gap: 8px; padding: 9px 12px; cursor: pointer; font-size: 13.5px; color: var(--muted); }
+.steps > summary::-webkit-details-marker { display: none; }
+.steps > summary .i { width: 14px; height: 14px; }
+.steps > summary .chev { margin-left: auto; transition: transform .2s var(--ease); color: var(--faint); }
+.steps[open] > summary .chev { transform: rotate(90deg); }
+.steps > summary b { color: var(--text); font-weight: 560; }
+.step { border-top: 1px solid var(--border); padding: 8px 12px; display: grid; gap: 6px; }
+.step-row { display: flex; align-items: center; gap: 8px; font-size: 13px; min-width: 0; }
+.step-row .i { width: 14px; height: 14px; color: var(--up); }
+.step-row.error .i { color: var(--down); }
+.step-row code { font: 12.5px var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.step-row .t { margin-left: auto; color: var(--faint); font-size: 12px; white-space: nowrap; }
+.out { margin: 0; font: 12px/1.55 var(--mono); background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 180px; overflow: auto; color: var(--muted); }
+
+.note { display: flex; gap: 8px; align-items: flex-start; padding: 8px 12px; border-radius: 10px; font-size: 13px; background: var(--surface-2); color: var(--muted); }
+.note .i { margin-top: 2px; width: 14px; height: 14px; }
+.note.warn { background: color-mix(in srgb, var(--warn) 10%, transparent); color: color-mix(in srgb, var(--warn) 70%, var(--text)); }
+.note.warn .i { color: var(--warn); }
+.note.error { background: color-mix(in srgb, var(--down) 10%, transparent); color: color-mix(in srgb, var(--down) 75%, var(--text)); }
+.note.error .i { color: var(--down); }
+
+/* the approval card: everything that changes the Pi stops here */
+.ask-card { border: 1px solid color-mix(in srgb, var(--info) 45%, var(--border)); background: var(--surface); border-radius: 14px; box-shadow: var(--shadow); overflow: hidden; }
+.ask-card.risky { border-color: color-mix(in srgb, var(--warn) 50%, var(--border)); }
+.ask-card.settled { border-color: var(--border); box-shadow: none; }
+.ask-head { display: flex; align-items: center; gap: 8px; padding: 12px 14px 0; flex-wrap: wrap; }
+.ask-head h4 { margin: 0; font-size: 14.5px; font-weight: 650; }
+.ask-head .badge.change { color: var(--info); border-color: color-mix(in srgb, var(--info) 35%, var(--border)); background: color-mix(in srgb, var(--info) 8%, var(--surface)); }
+.ask-head .badge.risk { color: color-mix(in srgb, var(--warn) 80%, var(--text)); border-color: color-mix(in srgb, var(--warn) 40%, var(--border)); background: color-mix(in srgb, var(--warn) 9%, var(--surface)); }
+.ask-head .wait { margin-left: auto; font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+.ask-why { margin: 6px 14px 0; font-size: 13.5px; color: var(--muted); }
+.cmd { margin: 10px 14px 0; font: 12.5px/1.5 var(--mono); background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.cmd::before { content: "$ "; color: var(--faint); }
+textarea.cmd { display: block; width: calc(100% - 28px); color: var(--text); resize: vertical; min-height: 60px; border-color: var(--info); outline: none; }
+textarea.cmd::before { content: none; }
+.edited { margin: 6px 14px 0; font-size: 12px; color: var(--muted); }
+.effects { list-style: none; margin: 10px 0 0; padding: 0 14px; display: grid; gap: 6px; font-size: 13.5px; }
+.effects li { display: grid; grid-template-columns: 16px 1fr; gap: 8px; align-items: start; }
+.effects .i { width: 15px; height: 15px; margin-top: 2px; color: var(--muted); }
+.ask-foot { display: flex; align-items: center; gap: 8px; padding: 12px 14px; margin-top: 12px; border-top: 1px solid var(--border); background: color-mix(in srgb, var(--surface-2) 55%, var(--surface)); flex-wrap: wrap; }
+.ask-foot .grow { flex: 1; font-size: 12px; color: var(--muted); min-width: 140px; }
+.run-log { margin: 10px 14px 0; font: 12px/1.6 var(--mono); background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; max-height: 240px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ask-card:not(.settled) .run-log:empty::before { content: "Waiting for output…"; color: var(--faint); }
+.ask-card details { margin-top: 10px; }
+.ask-card details > summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 6px; padding: 0 14px; font-size: 12.5px; color: var(--muted); }
+.ask-card details > summary::-webkit-details-marker { display: none; }
+.ask-card details > summary .i { width: 13px; height: 13px; }
+.result { display: flex; align-items: center; gap: 8px; padding: 10px 14px 12px; font-size: 13.5px; font-weight: 600; }
+.result.ok { color: var(--up); } .result.bad { color: var(--down); } .result.off { color: var(--muted); }
+.result .i { width: 15px; height: 15px; }
+.result .muted { font-weight: 500; }
+
+.chip-ctx { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; padding: 2px 6px 2px 9px; border-radius: 99px; background: var(--surface-2); border: 1px solid var(--border); color: var(--muted); max-width: 100%; }
+.chip-ctx span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip-ctx button { border: 0; background: none; padding: 0; display: grid; cursor: pointer; color: var(--faint); }
+.chip-ctx .i { width: 13px; height: 13px; flex: none; }
+
+.composer { border-top: 1px solid var(--border); padding: 10px 14px calc(12px + env(safe-area-inset-bottom)); background: var(--surface); display: grid; gap: 8px; margin: 0; }
+.composer-ctx { display: flex; gap: 6px; flex-wrap: wrap; }
+.composer-ctx:empty { display: none; }
+.composer-box { display: flex; align-items: flex-end; gap: 8px; border: 1px solid var(--border-strong); border-radius: 14px; padding: 6px 6px 6px 12px; background: var(--bg); transition: border-color .15s; }
+.composer-box:focus-within { border-color: var(--info); }
+.composer-box textarea { flex: 1; border: 0; outline: 0; background: none; resize: none; font: inherit; font-size: 14.5px; color: var(--text); padding: 5px 0; min-height: 22px; max-height: 140px; }
+.composer-box .btn { width: 32px; height: 32px; padding: 0; border-radius: 9px; flex: none; }
+.composer-box .btn.stop { background: var(--text); color: var(--bg); border-color: var(--text); }
+.composer-foot { display: flex; justify-content: space-between; gap: 4px 12px; font-size: 12px; color: var(--faint); flex-wrap: wrap; }
+.composer-foot span { display: inline-flex; align-items: center; gap: 5px; }
+.composer-foot .i { width: 12px; height: 12px; }
+
+/* "Ask why" under an expanded problem in Activity, when the assistant is on */
+.ev-ask { display: none; margin: -4px 16px 14px 58px; }
+body.has-assistant .ev-ask { display: flex; }
+.ev-ask .btn { height: 30px; font-size: 13px; }
+.ev-ask .btn .i { color: var(--info); }
+.ev-ico.agent { background: color-mix(in srgb, var(--info) 12%, transparent); color: var(--info); }
+
 @media (max-width: 760px) {
   .top { padding: 18px 16px 2px; }
   .banner { margin: 10px 16px 0; }
@@ -523,6 +647,9 @@ body.offline main { opacity: .55; filter: grayscale(.4); }
   .uptime { gap: 10px; }
 
   .ev-log pre { margin-left: 16px; }
+  .ev-ask { margin-left: 16px; }
+  .chat { padding: 14px 14px 20px; }
+  .btn.ask kbd { display: none; }
   .log .line { grid-template-columns: 1fr; }
   .log .ts { font-size: 11px; }
   .pill-text { max-width: 44vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -535,6 +662,9 @@ body.offline main { opacity: .55; filter: grayscale(.4); }
   .stat-value { font-size: 22px; }
   .stat-value small { font-size: 12.5px; }
   .meter-legend .free { display: none; }
+  .btn.ask { width: 34px; padding: 0; justify-content: center; }
+  .btn.ask span { display: none; }
+  .ask-foot .btn { flex: 1; justify-content: center; }
   .info-label { font-size: 0; }  /* phones: the short label, or none where the icon and value say it */
   .info-label::before { content: attr(data-short); font-size: 13.5px; }
   .info-label[data-short=""] { display: none; }

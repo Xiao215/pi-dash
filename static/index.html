@@ -46,6 +46,10 @@
       <symbol id="i-package" viewBox="0 0 24 24"><path d="M16.5 9.4 7.55 4.24"/><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="M3.27 6.96 12 12.01l8.73-5.05M12 22.08V12"/></symbol>
       <symbol id="i-heart" viewBox="0 0 24 24"><path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/><path d="M3.22 12H9.5l.5-1 2 4.5 2-7 1.5 3.5h5.27"/></symbol>
       <symbol id="i-back" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></symbol>
+      <symbol id="i-sparkle" viewBox="0 0 24 24"><path d="M9.94 15.5A2 2 0 0 0 8.5 14.06l-6.13-1.58a.5.5 0 0 1 0-.96L8.5 9.94A2 2 0 0 0 9.94 8.5l1.58-6.13a.5.5 0 0 1 .96 0L14.06 8.5A2 2 0 0 0 15.5 9.94l6.13 1.58a.5.5 0 0 1 0 .96L15.5 14.06a2 2 0 0 0-1.44 1.44l-1.58 6.13a.5.5 0 0 1-.96 0z"/><path d="M20 3v4M22 5h-4M4 17v2M5 18H3"/></symbol>
+      <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+      <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.06 12.35a1 1 0 0 1 0-.7 10.75 10.75 0 0 1 19.88 0 1 1 0 0 1 0 .7 10.75 10.75 0 0 1-19.88 0"/><circle cx="12" cy="12" r="3"/></symbol>
+      <symbol id="i-hand" viewBox="0 0 24 24"><path d="M18 11V6a2 2 0 0 0-4 0v5M14 10V4a2 2 0 0 0-4 0v6M10 10.5V6a2 2 0 0 0-4 0v8"/><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15"/></symbol>
       <symbol id="i-external" viewBox="0 0 24 24"><path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></symbol>
     </defs>
   </svg>
@@ -59,6 +63,7 @@
       </div>
     </div>
     <div class="top-right">
+      <button class="btn ask" id="ask-btn" title="Ask the assistant (/)" hidden><svg class="i"><use href="#i-sparkle"/></svg><span>Ask</span><kbd>/</kbd></button>
       <span class="pill" id="overall"><span class="dot"></span><span class="pill-text">Connecting…</span></span>
       <div class="menu-wrap">
         <button class="btn icon" id="mute-btn" aria-haspopup="menu" aria-expanded="false" title="Discord alerts"><svg class="i"><use href="#i-bell"/></svg></button>
@@ -183,6 +188,33 @@
     </div>
     <div class="log wrap" id="log" tabindex="0"></div>
     <button class="btn jump" id="jump" hidden><svg class="i"><use href="#i-arrow-down"/></svg>Jump to latest</button>
+  </aside>
+  <aside class="drawer agent" id="agent" aria-hidden="true" aria-labelledby="agent-title">
+    <div class="drawer-head">
+      <div class="drawer-title-row">
+        <div>
+          <h3 class="agent-title" id="agent-title"><svg class="i"><use href="#i-sparkle"/></svg>Assistant</h3>
+          <p class="muted small" id="agent-sub"><span class="live-dot off"></span><span id="agent-sub-text"></span></p>
+        </div>
+        <div class="agent-head-btns">
+          <button class="btn icon quiet" id="agent-new" title="New chat"><svg class="i"><use href="#i-plus"/></svg></button>
+          <button class="btn icon" id="agent-close" aria-label="Close"><svg class="i"><use href="#i-x"/></svg></button>
+        </div>
+      </div>
+    </div>
+    <div class="chat" id="chat" tabindex="0"></div>
+    <form class="composer" id="composer">
+      <div class="composer-ctx" id="agent-ctx"></div>
+      <div class="composer-box">
+        <label class="sr-only" for="ask-input">Message</label>
+        <textarea rows="1" id="ask-input" placeholder="Ask about the Pi, a service, an alert…" autocomplete="off"></textarea>
+        <button class="btn accent" id="ask-send" title="Send"><svg class="i"><use href="#i-send"/></svg></button>
+      </div>
+      <div class="composer-foot">
+        <span><svg class="i"><use href="#i-eye"/></svg>Reads freely · <svg class="i"><use href="#i-hand"/></svg>waits for you before any change</span>
+        <span id="agent-cost"></span>
+      </div>
+    </form>
   </aside>
   <div class="scrim" id="scrim"></div>
 

@@ -9,7 +9,7 @@ User=@USER@
 Group=@GROUP@
 SupplementaryGroups=@GROUPS@
 WorkingDirectory=@DIR@
-ExecStart=/usr/bin/python3 -m pidash
+ExecStart=@PYTHON@ -m pidash
 Environment=PYTHONUNBUFFERED=1 PIDASH_CONFIG=/etc/pi-dash/config.toml
 StateDirectory=pi-dash
 Restart=always

@@ -1,33 +1,14 @@
 """Unit tests for the parts of pi-dash that don't need a Pi: python3 -m unittest discover -s tests"""
 
 import json
-import os
 import queue
-import sys
 import tempfile
 import time
 import unittest
 import unittest.mock
 from pathlib import Path
 
-# Point pi-dash at a throwaway config and state folder before anything imports it.
-_tmp = tempfile.TemporaryDirectory()
-_config = Path(_tmp.name) / "config.toml"
-_config.write_text("""
-[server]
-port = 9123
-allowed_hosts = ["dash.example.org"]
-[services]
-registry = "%s/services.json"
-extra_path = ["~/tools/bin"]
-[discord]
-webhook_url = "https://discord.com/api/webhooks/1/abc"
-ping_user_id = "42"
-""" % _tmp.name)
-os.environ["PIDASH_CONFIG"] = str(_config)
-os.environ["STATE_DIRECTORY"] = str(Path(_tmp.name) / "state")
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
+import _env  # noqa: F401 - a throwaway config and state folder, before anything imports pidash
 from pidash import auth, config, notify, passwd, scheduled, services, store, system, watch, web, wifi  # noqa: E402
 
 

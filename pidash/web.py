@@ -14,10 +14,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import auth, config, notify, scheduled, services, store, system, watch, wifi
+from . import agent, auth, config, notify, scheduled, services, store, system, watch, wifi
 
 log = logging.getLogger(__name__)
 STATIC = Path(__file__).resolve().parent.parent / "static"
+TAILNET = (ipaddress.ip_network("100.64.0.0/10"), ipaddress.ip_network("fd7a:115c:a1e0::/48"))
 
 
 _version = {"key": None, "value": ""}
@@ -234,6 +235,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(state())
             if parts == ["api", "wifi"]:
                 return self._json(wifi.networks())
+            if parts[:2] == ["api", "agent"]:
+                return self._agent_get(parts[2:], url)
             if parts[:2] == ["api", "jobs"] and len(parts) == 3:
                 job = services.jobs.get(parts[2])
                 if not job:
@@ -273,6 +276,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": True}, headers=[self._cookie("", 0)])
         if not self._authed():
             return self._json({"error": "sign in first"}, 401)
+        if parts[:2] == ["api", "agent"]:
+            return self._agent_post(parts[2:])
         if parts[:2] == ["api", "services"] and len(parts) == 4:
             svc, action = self._service(parts[2]), parts[3]
             if not svc:
@@ -353,6 +358,84 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": True, "services": [s.name for s in watch.services_list()],
                                "jobs": [j.name for j in scheduled.jobs_list()]})
         self._json({"error": "not found"}, 404)
+
+    # ---- the assistant ----
+
+    def _over_tailscale(self) -> bool:
+        """The assistant only answers over Tailscale: from a tailnet address, or relayed by tailscale serve. Not
+        from the LAN, a container, or a program on the Pi calling localhost directly."""
+        ip = ipaddress.ip_address(self.client_address[0])
+        if ip.is_loopback:
+            return bool(self.headers.get("X-Forwarded-For"))
+        return any(ip in net for net in TAILNET)
+
+    def _agent_get(self, rest, url):
+        if not self._over_tailscale():
+            return self._json({"error": "The assistant only answers over Tailscale."}, 403)
+        if not rest:
+            return self._json(agent.overview())
+        try:
+            seq = int(parse_qs(url.query).get("since", ["0"])[0])
+        except ValueError:
+            return self._json({"error": "since must be a number"}, 400)
+        if len(rest) == 2 and rest[0] == "chats":
+            data = agent.since(rest[1], seq)
+            return self._json(data) if data else self._json({"error": "no such chat"}, 404)
+        if len(rest) == 3 and rest[0] == "chats" and rest[2] == "stream":
+            return self._agent_stream(rest[1], seq)
+        return self._json({"error": "not found"}, 404)
+
+    def _agent_post(self, rest):
+        if not self._over_tailscale():
+            return self._json({"error": "The assistant only answers over Tailscale."}, 403)
+        body = self._body()
+        text = body.get("text") if isinstance(body.get("text"), str) else ""
+        try:
+            if rest == ["chats"]:
+                return self._json(agent.new_chat(text, body.get("context")))
+            if len(rest) == 3 and rest[0] == "chats":
+                cid, action = rest[1], rest[2]
+                if action == "messages":
+                    return self._json(agent.send(cid, text))
+                if action == "decide":
+                    command = body.get("command") if isinstance(body.get("command"), str) else None
+                    return self._json(agent.decide(cid, str(body.get("call", "")), body.get("run") is True, command))
+                if action == "stop":
+                    return self._json(agent.stop(cid))
+                if action == "delete":
+                    agent.delete(cid)
+                    return self._json({"ok": True})
+        except LookupError as e:
+            return self._json({"error": str(e).strip("'")}, 404)
+        except ValueError as e:
+            return self._json({"error": str(e)}, 409)
+        return self._json({"error": "not found"}, 404)
+
+    def _agent_stream(self, cid, seq):
+        """Server-sent events: the chat's changes since `seq`, then each change as it happens."""
+        data = agent.since(cid, seq)
+        if data is None:
+            return self._json({"error": "no such chat"}, 404)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+        first = True
+        try:
+            while True:
+                if first or data["seq"] > seq:
+                    self.wfile.write(b"data: " + json.dumps(data).encode() + b"\n\n")
+                    seq, first = data["seq"], False
+                else:
+                    self.wfile.write(b": keep-alive\n\n")
+                self.wfile.flush()
+                time.sleep(0.15)  # let a reply that's streaming in gather a few words per message
+                data = agent.wait(cid, seq, 15)
+                if data is None:
+                    return
+        except (BrokenPipeError, ConnectionResetError):
+            return
 
     def _length(self) -> int:
         try:

@@ -35,6 +35,54 @@ PY
   fi
 fi
 
+# The assistant (optional): Claude in a chat panel. Its one dependency lives in .venv, away from the system Python.
+PYTHON=/usr/bin/python3
+assistant_on() { sudo python3 -c "import tomllib; print(tomllib.load(open('$CONF', 'rb')).get('assistant', {}).get('enabled', False))"; }
+if [ "$(assistant_on)" != True ] && [ -t 0 ]; then
+  printf 'Turn on the assistant? Claude looks into problems for you and asks before changing anything [y/N] '
+  read -r ANSWER || ANSWER=n
+  case "$ANSWER" in [yY]*)
+    KEY="" BASE_URL=""
+    if curl -fs -m 2 http://127.0.0.1:8787/health >/dev/null 2>&1; then
+      printf 'cli-bridge answers on this machine. Use it (your Claude plan) instead of an API key? [Y/n] '
+      read -r ANSWER || ANSWER=n
+      case "$ANSWER" in [nN]*) ;; *) BASE_URL="http://127.0.0.1:8787" ;; esac
+    fi
+    if [ -z "$BASE_URL" ]; then
+      printf 'Anthropic API key (hidden; Enter to add it to %s later): ' "$CONF"; read -rs KEY || KEY=""; echo
+    fi
+    KEY="$KEY" BASE_URL="$BASE_URL" CONF="$CONF" EXAMPLE="$DIR/config.example.toml" sudo -E python3 - <<'PY'
+import json, os, re
+path, key, base_url = os.environ["CONF"], os.environ["KEY"].strip(), os.environ["BASE_URL"]
+text = open(path).read()
+if "[assistant]" not in text:  # a config from before the assistant existed
+    example = open(os.environ["EXAMPLE"]).read()
+    text = text.rstrip() + "\n\n" + example[example.index("[assistant]"):]
+head, section = text.split("[assistant]", 1)
+section = re.sub(r"^enabled = \w+", "enabled = true", section, count=1, flags=re.M)
+if key:
+    section = re.sub(r'^api_key = ".*?"', f"api_key = {json.dumps(key)}", section, count=1, flags=re.M)
+if base_url:
+    if re.search(r"^base_url = ", section, flags=re.M):
+        section = re.sub(r'^base_url = ".*?"', f"base_url = {json.dumps(base_url)}", section, count=1, flags=re.M)
+    else:
+        section = re.sub(r"^(api_key = .*)$", rf"\1\nbase_url = {json.dumps(base_url)}", section, count=1, flags=re.M)
+open(path, "w").write(head + "[assistant]" + section)
+PY
+    ;;
+  esac
+fi
+if [ "$(assistant_on)" = True ]; then
+  if [ ! -x "$DIR/.venv/bin/python3" ]; then
+    python3 -m venv --system-site-packages "$DIR/.venv" 2>/dev/null || {
+      rm -rf "$DIR/.venv"; sudo apt-get install -y python3-venv >/dev/null
+      python3 -m venv --system-site-packages "$DIR/.venv"; }
+  fi
+  "$DIR/.venv/bin/pip" install --quiet --disable-pip-version-check "anthropic>=1.17,<2"
+  PYTHON="$DIR/.venv/bin/python3"
+  sudo -n true 2>/dev/null || echo "Note: commands you approve that use sudo need passwordless sudo for $USER_NAME."
+fi
+
 # Only add groups that exist here; systemd refuses to start with an unknown one.
 GROUPS_FOUND=""
 for g in docker adm systemd-journal video; do
@@ -43,7 +91,7 @@ done
 
 fill() {
   sed -e "s|@USER@|$USER_NAME|g" -e "s|@GROUP@|$GROUP_NAME|g" -e "s|@UID@|$(id -u)|g" -e "s|@DIR@|$DIR|g" \
-      -e "s|@GROUPS@|${GROUPS_FOUND# }|g" "$1"
+      -e "s|@GROUPS@|${GROUPS_FOUND# }|g" -e "s|@PYTHON@|$PYTHON|g" "$1"
 }
 
 fill "$DIR/deploy/pi-dash.service" | sudo tee /etc/systemd/system/pi-dash.service >/dev/null
