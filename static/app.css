@@ -136,6 +136,16 @@ main > section { min-width: 0; }
 .stat.warn .meter > i { background: var(--warn); }
 .stat.bad .meter > i { background: var(--down); }
 .meter-legend { display: flex; justify-content: space-between; font-size: 10.5px; color: var(--faint); margin-top: 6px; }
+.drives { display: grid; gap: 5px; margin-top: 12px; }
+.drive { display: grid; grid-template-columns: minmax(0, 4.5em) minmax(0, 1fr) 3.4em; align-items: center; gap: 8px; font-size: 11.5px; color: var(--muted); }
+.drive-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.drive-bar { height: 5px; border-radius: 99px; background: var(--bar-empty); overflow: hidden; }
+.drive-bar > i { display: block; width: 0; height: 100%; border-radius: inherit; background: var(--info); transition: width .8s var(--ease); }
+.drive-pct { text-align: right; font-variant-numeric: tabular-nums; }
+.drive.warn .drive-bar > i { background: var(--warn); }
+.drive.bad .drive-bar > i { background: var(--down); }
+.drive.warn .drive-pct { color: var(--warn); }
+.drive.bad .drive-pct { color: var(--down); }
 
 .info { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .info-cell { display: inline-flex; align-items: center; gap: 7px; min-width: 0; max-width: 100%; height: 34px; padding: 0 13px 0 11px;

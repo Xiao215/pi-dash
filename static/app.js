@@ -25,6 +25,7 @@ function localSet(k, v) { try { localStorage.setItem(k, v); } catch { /* private
 
 const gb = (b) => (b / 1024 ** 3).toFixed(1);
 const mb = (b) => (b >= 1024 ** 3 ? `${gb(b)} GB` : `${Math.round(b / 1024 ** 2)} MB`);
+const size = (b) => (b >= 1024 ** 4 ? `${(b / 1024 ** 4).toFixed(1)} TB` : `${gb(b)} GB`);
 function dur(sec) {
   sec = Math.max(0, Math.floor(sec));
   const d = Math.floor(sec / 86400), h = Math.floor((sec % 86400) / 3600), m = Math.floor((sec % 3600) / 60);
@@ -104,7 +105,7 @@ function buildStats() {
       <div class="stat-sub"><span class="skel">loading</span></div>
       ${s.spark
         ? `<svg class="spark" viewBox="0 0 100 34" preserveAspectRatio="none" role="img" aria-label="${s.label}, last 6 hours"><title>Last 6 hours</title><path class="area" d=""/><path class="line" d=""/></svg>`
-        : `<div class="meter"><i></i></div><div class="meter-legend"><span class="used"></span><span class="free"></span></div>`}
+        : `<div class="meter"><i></i></div><div class="meter-legend"><span class="used"></span><span class="free"></span></div><div class="drives" hidden></div>`}
     </div>`).join("");
   // key, icon, label, and a shorter label for phones ("" when the icon and value say it)
   $("#info").innerHTML = [["uptime", "clock", "Uptime", "Up"], ["power", "zap", "Power", "Power"], ["network", "wifi", "Network", ""],
@@ -163,7 +164,6 @@ function renderPi(data) {
   const pi = data.pi, h = data.history || {};
   const memUsed = pi.mem.total - pi.mem.available;
   const memPct = (100 * memUsed) / pi.mem.total;
-  const diskPct = (100 * pi.disk.used) / pi.disk.total;
   const lvl = (v, warn, bad) => (v >= bad ? "bad" : v >= warn ? "warn" : "");
   const peaks = h.peak || {};
   const peakText = (key, unit) => (peaks[key] != null ? ` · 6 h peak ${peaks[key].toFixed(0)}${unit}` : "");
@@ -172,7 +172,7 @@ function renderPi(data) {
   setStat("mem", { value: `${gb(memUsed)}<small> / ${gb(pi.mem.total)} GB</small>`, sub: `${mb(pi.mem.available)} available`, level: lvl(memPct, 80, 90), series: h.mem, range: [0, 100] });
   if (pi.temp == null) setStat("temp", { value: "—", sub: "no temperature sensor", series: [], range: [20, 90] });
   else setStat("temp", { value: `${pi.temp.toFixed(0)}<small>°C</small>`, sub: (pi.temp >= 80 ? "throttling" : pi.temp >= 70 ? "warm" : "cool") + peakText("temp", "°C"), level: lvl(pi.temp, 70, 80), series: h.temp, range: [20, 90] });
-  setStat("disk", { value: `${diskPct.toFixed(0)}<small>%</small>`, sub: `${gb(pi.disk.free)} GB free`, level: lvl(diskPct, 80, 90), pct: diskPct, used: `${gb(pi.disk.used)} GB used`, free: `${gb(pi.disk.total)} GB` });
+  renderDrives(pi, lvl);
 
   setInfo("uptime", dur(pi.uptime) + (pi.reboot_required ? " · restart pending" : ""), pi.reboot_required ? "warn" : "",
     pi.reboot_required ? `An installed update needs a restart${pi.reboot_packages?.length ? `: ${pi.reboot_packages.join(", ")}` : ""}.`
@@ -205,6 +205,36 @@ function renderPi(data) {
   renderNet(data);
 
   $("#model").textContent = [pi.model.replace(" Model ", " ").replace(/ Rev [\d.]+/, ""), pi.os.replace("GNU/Linux ", "")].filter(Boolean).join(" · ");
+}
+
+const drivePct = (d) => (100 * d.used) / d.total;
+
+/** The Disk card: one big bar for a single drive; with more, the fullest in the headline and a bar per drive. */
+function renderDrives(pi, lvl) {
+  const drives = pi.drives?.length ? pi.drives : [{ name: "SD card", path: "/", ...pi.disk }];
+  const present = drives.filter((d) => !d.missing && d.total), missing = drives.filter((d) => d.missing);
+  const el = $("#stat-disk"), list = $(".drives", el);
+  const many = drives.length > 1;
+  $(".meter", el).hidden = $(".meter-legend", el).hidden = many;
+  list.hidden = !many;
+  if (!present.length) return setStat("disk", { value: "—", sub: missing.length ? "drive missing" : "no drive found", level: missing.length ? "warn" : "" });
+  const top = present.reduce((a, d) => (drivePct(d) > drivePct(a) ? d : a));
+  const pct = drivePct(top);
+  const level = lvl(pct, 80, 90) || (missing.length ? "warn" : "");
+  if (!many) {
+    return setStat("disk", { value: `${pct.toFixed(0)}<small>%</small>`, sub: `${size(top.free)} free`, level, pct,
+      used: `${size(top.used)} used`, free: size(top.total) });
+  }
+  const sub = missing.length ? `${missing.map((d) => d.name).join(", ")} missing` : `${top.name} fullest · ${size(top.free)} free`;
+  setStat("disk", { value: `${pct.toFixed(0)}<small>%</small>`, sub: esc(sub), level });
+  put(list, drives.map((d) => {
+    if (d.missing) {
+      return `<div class="drive warn" title="${esc(`${d.path} is in /etc/fstab but isn't mounted`)}"><span class="drive-name">${esc(d.name)}</span><span class="drive-bar"><i></i></span><span class="drive-pct">missing</span></div>`;
+    }
+    const p = drivePct(d);
+    const title = [d.path, d.model, `${size(d.used)} of ${size(d.total)} used`, `${size(d.free)} free`].filter(Boolean).join(" · ");
+    return `<div class="drive ${lvl(p, 80, 90)}" title="${esc(title)}"><span class="drive-name">${esc(d.name)}</span><span class="drive-bar"><i style="width:${Math.min(100, p).toFixed(1)}%"></i></span><span class="drive-pct">${p.toFixed(0)}%</span></div>`;
+  }).join(""));
 }
 
 // ---- network: 6 h of download/upload, with internet outages shaded ----------------------
@@ -752,10 +782,13 @@ function renderOverall(data) {
   const bad = data.services.filter((s) => ["down", "missing"].includes(s.state));
   const meh = data.services.filter((s) => ["unhealthy", "starting"].includes(s.state));
   const pi = data.pi;
-  const piBad = pi.power.flags.some((f) => f.endsWith("now")) || pi.temp >= 80 || pi.disk.used / pi.disk.total >= 0.9;
+  const drives = pi.drives || [{ path: "/", ...pi.disk }];
+  const piBad = pi.power.flags.some((f) => f.endsWith("now")) || pi.temp >= 80 || drives.some((d) => !d.missing && d.total && d.used / d.total >= 0.9);
+  const lost = drives.filter((d) => d.missing);
   let c = "up", text = "All systems normal";
   if (bad.length || piBad) { c = "down"; text = bad.length ? `${bad.map((s) => s.name).join(", ")} ${bad.length > 1 ? "are" : "is"} down` : "The Pi needs attention"; }
   else if (meh.length) { c = "warn"; text = `${meh.map((s) => s.name).join(", ")} ${meh.every((s) => s.state === "starting") ? "starting" : "unhealthy"}`; }
+  else if (lost.length) { c = "warn"; text = `Drive missing: ${lost.map((d) => d.path).join(", ")}`; }
   const pill = $("#overall");
   cls(pill, `pill ${c}`);
   put($(".pill-text", pill), esc(text));

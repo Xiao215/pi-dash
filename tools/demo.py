@@ -2,6 +2,7 @@
 
     python3 tools/demo.py              # http://localhost:9100
     python3 tools/demo.py --trouble    # one service down, a hot CPU, a red alert
+    python3 tools/demo.py --drives     # a USB SSD next to the SD card, and a backup drive that's unplugged
 """
 
 import argparse
@@ -220,6 +221,7 @@ LOG = [
 
 class Handler(BaseHTTPRequestHandler):
     trouble = False
+    drives = False
 
     def log_message(self, *args):
         pass
@@ -243,6 +245,11 @@ class Handler(BaseHTTPRequestHandler):
             if wifi_state():
                 return self._send({"error": "switching"}, code=503)
             st = state(self.trouble)
+            sd = {"name": "SD card", "path": "/", "device": "/dev/mmcblk0p2", "model": "SD32G", **st["pi"]["disk"]}
+            st["pi"]["drives"] = [sd] + ([
+                {"name": "data", "path": "/mnt/data", "device": "/dev/sda1", "model": "Samsung Portable SSD T7",
+                 "total": 931.5 * GB, "used": 812.4 * GB, "free": 119.1 * GB},
+                {"name": "backup", "path": "/mnt/backup", "missing": True}] if self.drives else [])
             active = next(n for n in WIFI if n["active"])
             st["pi"]["network"]["wifi"] = {"ssid": active["ssid"], "signal": active["signal"]}
             return self._send({**st, "wifi_switch": wifi_switch})
@@ -287,8 +294,10 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--port", type=int, default=9100)
     p.add_argument("--trouble", action="store_true", help="show a service down and a hot CPU")
+    p.add_argument("--drives", action="store_true", help="show a second drive, and one that's missing")
     args = p.parse_args()
     Handler.trouble = args.trouble
+    Handler.drives = args.drives
     ThreadingHTTPServer.daemon_threads = True
     print(f"pi-dash demo on http://localhost:{args.port}")
     ThreadingHTTPServer(("127.0.0.1", args.port), Handler).serve_forever()

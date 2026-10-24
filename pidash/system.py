@@ -1,7 +1,8 @@
-"""The Pi itself: CPU, memory, temperature, power, disk, network, pending OS updates."""
+"""The Pi itself: CPU, memory, temperature, power, drives, network, pending OS updates."""
 
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -19,6 +20,9 @@ THROTTLE_BITS = {  # vcgencmd get_throttled
     18: "throttled since boot",
     19: "temperature limit since boot",
 }
+
+# Filesystems that live on a drive (not in memory, not the kernel's, not over the network). "auto" is fstab's "find out".
+DRIVE_FS = {"ext2", "ext3", "ext4", "xfs", "btrfs", "f2fs", "vfat", "exfat", "ntfs", "ntfs3", "fuseblk", "hfsplus", "auto"}
 
 # Interfaces whose traffic is counted elsewhere already (Tailscale rides on wlan0/eth0) or never leaves the Pi.
 VIRTUAL = ("lo", "docker", "veth", "br-", "tailscale", "wg", "tun", "virbr", "cni", "flannel")
@@ -242,7 +246,8 @@ def snapshot() -> dict:
         "temp": temperature(),
         "mem": {"total": mem["MemTotal"], "available": mem["MemAvailable"]},
         "swap": {"total": mem.get("SwapTotal", 0), "free": mem.get("SwapFree", 0)},
-        "disk": {"total": disk.total, "used": disk.used, "free": disk.free},
+        "disk": {"total": disk.total, "used": disk.used, "free": disk.free},  # the system drive, also in "drives"
+        "drives": drives(),
         "uptime": uptime(),
         "power": {"value": hex(value), "flags": flags},
         "reboot_required": Path("/var/run/reboot-required").exists(),
@@ -251,6 +256,86 @@ def snapshot() -> dict:
         "net": {"rx": round(_live["rx"]), "tx": round(_live["tx"])},
         "updates": updates,
     }
+
+
+def _unescape(field: str) -> str:
+    """/proc/mounts and fstab write a space in a path as \\040 (and tab, newline, backslash the same way)."""
+    return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), field)
+
+
+def _boot_area(path: str) -> bool:
+    return path == "/boot" or path.startswith("/boot/")  # the small partition the Pi starts from, not a drive
+
+
+def parse_mounts(text: str) -> list[dict]:
+    """/proc/mounts -> the drives mounted now: [{"device", "path", "fs"}], one per device (a bind mount of a
+    folder on it shows up again under another path), the boot partition left out."""
+    out, seen = [], set()
+    for line in text.splitlines():
+        f = line.split()
+        if len(f) < 3 or not f[0].startswith("/dev/") or f[2] not in DRIVE_FS:
+            continue
+        device, path = _unescape(f[0]), _unescape(f[1])
+        if device in seen or _boot_area(path):
+            continue
+        seen.add(device)
+        out.append({"device": device, "path": path, "fs": f[2]})
+    return out
+
+
+def parse_fstab(text: str) -> list[str]:
+    """/etc/fstab -> the mount points of drives that should be mounted (the system drive and boot area aside)."""
+    out = []
+    for line in text.splitlines():
+        f = line.split()
+        if len(f) < 4 or f[0].startswith("#"):
+            continue
+        path, fs, opts = _unescape(f[1]), f[2], f[3].split(",")
+        if fs in DRIVE_FS and path.startswith("/") and path != "/" and not _boot_area(path) and "noauto" not in opts:
+            out.append(path)
+    return out
+
+
+def _model(device: str, path: str) -> tuple[str, str]:
+    """(whole disk, model) for the partition mounted at path: ("sda", "Samsung SSD T7"), ("mmcblk0", "SD32G").
+    Found by device number, since older systems list the system drive as /dev/root."""
+    try:
+        dev = os.stat(path).st_dev
+        part = Path(f"/sys/dev/block/{os.major(dev)}:{os.minor(dev)}")
+    except OSError:
+        part = Path("/nonexistent")
+    if not part.exists():
+        part = Path("/sys/class/block") / Path(device).name
+    part = part.resolve()
+    disk = part.parent.name if (part / "partition").exists() else part.name
+    for attr in ("model", "name"):  # USB and SATA drives have a model; SD cards a name
+        text = _read(f"/sys/block/{disk}/device/{attr}").strip()
+        if text:
+            return disk, text
+    return disk, ""
+
+
+def drives() -> list[dict]:
+    """Every drive: what's used and free on each one mounted, and {"missing": True} for one fstab lists that isn't."""
+    mounts = _read("/proc/self/mounts")
+    out = []
+    for m in parse_mounts(mounts):
+        try:
+            use = shutil.disk_usage(m["path"])
+        except OSError:
+            continue
+        disk, model = _model(m["device"], m["path"])
+        if m["path"] == "/":
+            name = "SD card" if disk.startswith("mmcblk") else "System"
+        else:
+            name = Path(m["path"]).name
+        out.append({"name": name, "path": m["path"], "device": m["device"], "model": model,
+                    "total": use.total, "used": use.used, "free": use.free})
+    mounted = {_unescape(line.split()[1]) for line in mounts.splitlines() if len(line.split()) > 1}
+    for path in parse_fstab(_read("/etc/fstab")):
+        if path not in mounted:
+            out.append({"name": Path(path).name, "path": path, "missing": True})
+    return out
 
 
 def _reboot_packages() -> list[str]:

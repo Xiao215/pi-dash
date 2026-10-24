@@ -519,6 +519,67 @@ class Backlog(unittest.TestCase):
         self.assertEqual(self.internet([(False, 1000), (True, 1060)], uptime=50_000), [])  # a blip: not worth an alert
 
 
+class Drives(unittest.TestCase):
+    MOUNTS = """/dev/mmcblk0p2 / ext4 rw,noatime 0 0
+/dev/mmcblk0p1 /boot/firmware vfat rw 0 0
+tmpfs /tmp tmpfs rw 0 0
+/dev/zram0 /var/cache zram rw 0 0
+/dev/loop0 /snap/core squashfs ro 0 0
+/dev/sda1 /mnt/my\\040data ext4 rw 0 0
+/dev/sda1 /srv/photos ext4 rw 0 0
+nas:/share /mnt/nas nfs4 rw 0 0
+"""
+
+    def test_mounts_keep_one_entry_per_real_drive(self):
+        self.assertEqual([(m["device"], m["path"]) for m in system.parse_mounts(self.MOUNTS)],
+                         [("/dev/mmcblk0p2", "/"), ("/dev/sda1", "/mnt/my data")])
+
+    def test_fstab_lists_drives_that_should_be_mounted(self):
+        fstab = """# a comment
+proc            /proc           proc    defaults          0 0
+PARTUUID=8b-01  /boot/firmware  vfat    defaults          0 2
+PARTUUID=8b-02  /               ext4    defaults,noatime  0 1
+UUID=abcd       /mnt/data       ext4    defaults,nofail   0 2
+UUID=ef01       /mnt/spare      ext4    noauto,nofail     0 2
+/swapfile       none            swap    sw                0 0
+LABEL=photos    /mnt/old\\040photos auto  defaults        0 0
+"""
+        self.assertEqual(system.parse_fstab(fstab), ["/mnt/data", "/mnt/old photos"])
+
+    def check(self, drives, uptime=10_000, problems=None):
+        store.update_state(problems=problems or {})
+        with unittest.mock.patch.object(watch, "alert") as alert:
+            watch._check_drives({"drives": drives, "uptime": uptime})
+        return [c.args[:2] for c in alert.call_args_list]
+
+    SD = {"name": "SD card", "path": "/", "total": 100, "used": 30, "free": 70}
+
+    def test_a_full_extra_drive_alerts_by_name(self):
+        data = {"name": "data", "path": "/mnt/data", "total": 100, "used": 85, "free": 15}
+        self.assertEqual(self.check([self.SD, data]), [("warn", "data drive 85% full")])
+        self.assertIn("disk:/mnt/data", store.load_state()["problems"])
+
+    def test_a_full_system_drive_keeps_its_old_alert(self):
+        full = {**self.SD, "used": 95, "free": 5}
+        self.assertEqual(self.check([full]), [("error", "Disk 95% full")])
+        self.assertIn("disk", store.load_state()["problems"])
+
+    def test_missing_drive_warns_and_clears(self):
+        gone = {"name": "data", "path": "/mnt/data", "missing": True}
+        self.assertEqual(self.check([self.SD, gone], uptime=60), [])  # right after a restart: give it time
+        self.assertEqual(self.check([self.SD, gone]), [("warn", "Drive missing: /mnt/data")])
+        back = {"name": "data", "path": "/mnt/data", "total": 100, "used": 10, "free": 90}
+        with unittest.mock.patch.object(watch, "alert") as alert:
+            watch._check_drives({"drives": [self.SD, back], "uptime": 10_000})
+        self.assertEqual(alert.call_args.args[:2], ("ok", "/mnt/data is mounted again"))
+
+    def test_an_unplugged_full_drive_drops_its_full_problem_quietly(self):
+        gone = {"name": "data", "path": "/mnt/data", "missing": True}
+        alerts = self.check([self.SD, gone], problems={"disk:/mnt/data": time.time()})
+        self.assertEqual(alerts, [("warn", "Drive missing: /mnt/data")])
+        self.assertNotIn("disk:/mnt/data", store.load_state()["problems"])
+
+
 class PiStatus(unittest.TestCase):
     def test_throttle_flags(self):
         value, flags = system.parse_throttled("throttled=0x50005")
@@ -531,7 +592,8 @@ class PiStatus(unittest.TestCase):
     def test_health_check_without_a_temperature_sensor(self):
         real = system.snapshot
         fake = {"disk": {"used": 1, "total": 10, "free": 9}, "temp": None, "mem": {"available": 5, "total": 10},
-                "power": {"flags": []}}
+                "power": {"flags": []}, "uptime": 1000,
+                "drives": [{"name": "SD card", "path": "/", "used": 1, "total": 10, "free": 9}]}
         system.snapshot = lambda: fake
         try:
             with unittest.mock.patch.object(services, "run", return_value=(0, "")):

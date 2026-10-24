@@ -457,11 +457,33 @@ def _check_memory_growth():
                f"{svc.name}'s memory stopped growing", svc.name)
 
 
+def _check_drives(snap):
+    """Each drive filling up, and drives fstab lists that aren't mounted. The system drive keeps its old "disk" key."""
+    present = {d["path"] for d in snap["drives"] if not d.get("missing")}
+    with store.edit_state() as state:  # a drive that was unplugged while full: its "full" problem went with it
+        for key in [k for k in state.get("problems", {}) if k.startswith("disk:") and k[5:] not in present]:
+            del state["problems"][key]
+    for d in snap["drives"]:
+        if d.get("missing"):
+            if snap["uptime"] > 300:  # a USB drive can take a moment to come up after a restart
+                _check(f"mount:{d['path']}", True, "warn", f"Drive missing: {d['path']}",
+                       "It's in /etc/fstab but isn't mounted. Check its cable and power. Until it's back, whatever "
+                       f"writes to {d['path']} may fill the SD card instead.", f"{d['path']} is mounted again")
+            continue
+        _check(f"mount:{d['path']}", False, "", "", "", f"{d['path']} is mounted again")
+        system_drive = d["path"] == "/"
+        pct = 100 * d["used"] / d["total"] if d["total"] else 0
+        where = "on the SD card" if d["name"] == "SD card" else "on the system drive" if system_drive else f"on {d['path']}"
+        _check("disk" if system_drive else f"disk:{d['path']}", pct >= config.DISK_WARN,
+               "warn" if pct < config.DISK_WARN + 10 else "error",
+               f"Disk {pct:.0f}% full" if system_drive else f"{d['name']} drive {pct:.0f}% full",
+               f"{d['free'] / 1e9:.1f} GB left {where}.",
+               "Disk space is fine again" if system_drive else f"{d['name']} drive has space again")
+
+
 def _health_once():
     snap = system.snapshot()
-    disk_pct = 100 * snap["disk"]["used"] / snap["disk"]["total"]
-    _check("disk", disk_pct >= config.DISK_WARN, "warn" if disk_pct < config.DISK_WARN + 10 else "error", f"Disk {disk_pct:.0f}% full",
-           f"{snap['disk']['free'] / 1e9:.1f} GB left on the SD card.", "Disk space is fine again")
+    _check_drives(snap)
     t = snap["temp"]
     hot = t is not None and t >= config.TEMP_WARN
     _check("temp", hot, "error" if hot and t >= config.TEMP_WARN + 5 else "warn", f"Pi is hot: {t or 0:.0f} °C",
@@ -662,9 +684,10 @@ def send_digest():
         state = "running" if s["state"] == "up" else s["state"]
         rows.append(f"• **{svc.name}**: {state} · {pct_text} · {s.get('restarts', 0)} restarts")
     incidents = [e for e in store.events(500, since) if e["level"] in ("error", "warn")]
-    disk_pct = 100 * snap["disk"]["used"] / snap["disk"]["total"]
+    disk = " · ".join(("disk" if d["path"] == "/" else d["name"]) + (" missing" if d.get("missing") else f" {100 * d['used'] / d['total']:.0f}%")
+                      for d in snap["drives"] if d.get("missing") or d["total"])
     fields = [
-        ("Pi", f"up {ago(snap['uptime'])} · " + (f"{snap['temp']:.0f} °C · " if snap["temp"] is not None else "") + f"disk {disk_pct:.0f}% · "
+        ("Pi", f"up {ago(snap['uptime'])} · " + (f"{snap['temp']:.0f} °C · " if snap["temp"] is not None else "") + f"{disk} · "
                f"memory {100 - 100 * snap['mem']['available'] / snap['mem']['total']:.0f}% used", False),
         ("Last 24 h", f"{len(incidents)} problem{'s' if len(incidents) != 1 else ''} · "
                       f"{_updates_since(since)} packages updated" + _pending_text(snap) +
