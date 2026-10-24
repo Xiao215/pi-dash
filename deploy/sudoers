@@ -1,3 +1,4 @@
 # Template: install.sh installs it as /etc/sudoers.d/pi-dash (after checking it with visudo).
 # The only root commands pi-dash runs: restarting/shutting down the Pi and controlling system units.
+# (Switching Wi-Fi goes through NetworkManager instead; deploy/polkit.rules allows that.)
 @USER@ ALL=(root) NOPASSWD: /usr/bin/systemctl reboot, /usr/bin/systemctl poweroff, /usr/bin/systemctl start *, /usr/bin/systemctl stop *, /usr/bin/systemctl restart *

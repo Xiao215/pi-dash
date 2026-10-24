@@ -14,7 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import auth, config, notify, scheduled, services, store, system, watch
+from . import auth, config, notify, scheduled, services, store, system, watch, wifi
 
 log = logging.getLogger(__name__)
 STATIC = Path(__file__).resolve().parent.parent / "static"
@@ -87,7 +87,8 @@ def state():
     return {"now": now, "hostname": config.HOSTNAME, "pi": system.snapshot(), "services": svcs,
             "jobs": [scheduled.status(j) for j in scheduled.jobs_list()],
             "events": store.events(80), "history": _history(now), "heartbeat": heartbeat, "version": static_version(),
-            "muted_until": store.load_state().get("muted_until", 0), "auth": bool(config.PASSWORD_HASH)}
+            "muted_until": store.load_state().get("muted_until", 0), "auth": bool(config.PASSWORD_HASH),
+            "wifi_switch": wifi.switch}
 
 
 def _buckets(rows, since, n, step, get):
@@ -231,6 +232,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._page("index.html")
             if parts == ["api", "state"]:
                 return self._json(state())
+            if parts == ["api", "wifi"]:
+                return self._json(wifi.networks())
             if parts[:2] == ["api", "jobs"] and len(parts) == 3:
                 job = services.jobs.get(parts[2])
                 if not job:
@@ -327,6 +330,15 @@ class Handler(BaseHTTPRequestHandler):
                          else "Shutting the Pi down from the dashboard", discord=False)
             subprocess.Popen(["sudo", "-n", "systemctl", parts[2]], env=services.ENV)
             return self._json({"ok": True})
+        if parts == ["api", "wifi"]:
+            body = self._body()
+            ssid, password = body.get("ssid"), body.get("password", "")
+            if not isinstance(ssid, str) or not ssid or not isinstance(password, str):
+                return self._json({"error": "pick a network"}, 400)
+            try:
+                return self._json(wifi.start(ssid, password))
+            except ValueError as e:
+                return self._json({"error": str(e)}, 409)
         if parts == ["api", "test-alert"]:
             notify.alert("info", "Test alert from the dashboard", "If you can read this, alerts reach Discord.")
             return self._json({"ok": True})

@@ -106,7 +106,12 @@ function buildStats() {
   // key, icon, label, and a shorter label for phones ("" when the icon and value say it)
   $("#info").innerHTML = [["uptime", "clock", "Uptime", "Up"], ["power", "zap", "Power", "Power"], ["network", "wifi", "Network", ""],
     ["remote", "shield", "Remote access", ""], ["updates", "package", "OS updates", "Updates"], ["watchdog", "heart", "Outside watchdog", "Watchdog"]]
-    .map(([key, ic, label, short]) => `<div class="info-cell" id="info-${key}" tabindex="0">${icon(ic)}<span class="info-label" data-short="${short}">${label}</span><span class="info-value"><span class="skel">loading…</span></span></div>`)
+    .map(([key, ic, label, short]) => {
+      const inner = `${icon(ic)}<span class="info-label" data-short="${short}">${label}</span><span class="info-value"><span class="skel">loading…</span></span>`;
+      return key === "network"  // opens the list of Wi-Fi networks to switch to
+        ? `<div class="menu-wrap"><button class="info-cell" id="info-network" data-menu aria-haspopup="menu" aria-expanded="false">${inner}<svg class="i chev" aria-hidden="true"><use href="#i-chevron"/></svg></button><div class="menu wifi-menu" id="wifi-menu" role="menu"></div></div>`
+        : `<div class="info-cell" id="info-${key}" tabindex="0">${inner}</div>`;
+    })
     .join("");
 }
 
@@ -758,7 +763,7 @@ function renderOverall(data) {
   put(muteBtn, icon(muted ? "bell-off" : "bell"));
   muteBtn.title = muted ? `Discord alerts muted until ${hm(data.muted_until)}` : "Discord alerts";
   $("#unmute-item").hidden = !muted;
-  setBanner(muted ? { html: `${icon("bell-off")}<span class="grow">Discord alerts are muted until <b>${hm(data.muted_until)}</b>. Problems still show up here.</span><button class="btn" data-mute="0">Turn back on</button>` } : null);
+  setBanner(wifiBanner(data) || (muted ? { html: `${icon("bell-off")}<span class="grow">Discord alerts are muted until <b>${hm(data.muted_until)}</b>. Problems still show up here.</span><button class="btn" data-mute="0">Turn back on</button>` } : null));
 }
 
 let bannerOffline = false;
@@ -772,13 +777,13 @@ function setBanner(b) {
 }
 function setOffline(off) {
   document.body.classList.toggle("offline", off);
-  if (off === bannerOffline) return;
+  if (off === bannerOffline && !(off && wifiWatch)) return;
   bannerOffline = false;
   if (off) {
-    setBanner({ bad: true, html: `${icon("alert")}<span class="grow">Can't reach the Pi. Retrying every few seconds…</span>` });
+    setBanner(wifiWatch ? { html: wifiOfflineText() } : { bad: true, html: `${icon("alert")}<span class="grow">Can't reach the Pi. Retrying every few seconds…</span>` });
     bannerOffline = true;
-    cls($("#overall"), "pill down");
-    put($("#overall .pill-text"), "Offline");
+    cls($("#overall"), wifiWatch ? "pill warn" : "pill down");
+    put($("#overall .pill-text"), wifiWatch ? "Switching Wi-Fi" : "Offline");
   } else if (last) {
     setBanner(null);
   }
@@ -787,7 +792,7 @@ function setOffline(off) {
 // ---- refresh loop ---------------------------------------------------------------------
 
 function render(data) {
-  if (PAGE_VERSION && data.version && data.version !== PAGE_VERSION && !$("#drawer").classList.contains("open") && !$("#confirm").open) {
+  if (PAGE_VERSION && data.version && data.version !== PAGE_VERSION && !$("#drawer").classList.contains("open") && !$("dialog[open]")) {
     location.reload();  // load the new page; waits while logs or a dialog are open
     return;
   }
@@ -1104,7 +1109,7 @@ document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   if ($(".menu.open")) closeMenus();
   else if ($("#drawer").classList.contains("open")) closeDrawer();
-  else if (page && !$("#confirm").open) location.hash = "";
+  else if (page && !$("dialog[open]")) location.hash = "";
 });
 
 document.addEventListener("click", async (e) => {
@@ -1341,6 +1346,151 @@ $("#services").addEventListener("click", (e) => {
   const card = e.target.closest(".svc[data-name]");
   if (card) location.hash = `service/${encodeURIComponent(card.dataset.name)}`;
 });
+
+// ---- Wi-Fi: pick a network; the Pi switches, checks the internet works, or goes back -------------
+
+let wifiList = null;  // the last scan: {device, networks}
+let wifiScan = 0;     // bumped per scan, so a slow one can't overwrite a newer one
+let wifiWatch = null; // the switch this page is following: {ssid, started} (started is null until the Pi answers)
+
+function bars(signal) {
+  const lit = signal >= 75 ? 4 : signal >= 50 ? 3 : signal >= 25 ? 2 : 1;
+  return `<svg class="bars" viewBox="0 0 16 16" aria-hidden="true">${[3, 6.3, 9.6, 13]
+    .map((h, i) => `<rect x="${0.5 + i * 4}" y="${15 - h}" width="3" height="${h}" rx="1"${i < lit ? ' class="lit"' : ""}/>`).join("")}</svg>`;
+}
+
+/** What joining takes: "open" (OWE included: encrypted, no password), "password", or "login" (802.1X, which needs
+ *  a username and certificates; set that up on the Pi with nmcli, and once saved it can be picked here). */
+const wifiNeeds = (n) => (/802\.1X/.test(n.security) ? "login" : /WPA|WEP/.test(n.security) ? "password" : "open");
+
+function renderWifiMenu(scanning) {
+  const m = $("#wifi-menu");
+  const switching = Boolean(wifiWatch);
+  const head = `<p class="menu-label"><span>Wi-Fi networks</span>${scanning ? `<span class="spin small" title="Scanning"></span>` : ""}</p>`;
+  let body;
+  if (!wifiList) body = `<p class="menu-note"><span class="spin small"></span>Looking for networks…</p>`;
+  else if (wifiList.error) body = `<p class="menu-note">${icon("alert")}${esc(wifiList.error)}</p>`;
+  else if (!wifiList.device) body = `<p class="menu-note">This machine has no Wi-Fi.</p>`;
+  else if (!wifiList.networks.length) body = `<p class="menu-note">No networks in range.</p>`;
+  else body = wifiList.networks.map((n, i) => {
+    const needs = wifiNeeds(n), unsupported = needs === "login" && !n.saved;
+    const what = [`${n.signal}% signal`, n.security || "open", n.saved && !n.active ? "saved" : "",
+      unsupported ? "needs a username: set it up on the Pi with nmcli" : ""].filter(Boolean).join(" · ");
+    return `<button role="menuitem" class="wifi-row${n.active ? " on" : ""}" data-wifi="${i}" title="${esc(what)}"${switching || unsupported ? " disabled" : ""}>
+      ${bars(n.signal)}<span class="name">${esc(n.ssid)}</span>${n.saved && !n.active ? `<span class="saved">Saved</span>` : unsupported ? `<span class="saved">Needs login</span>` : ""}${needs !== "open" ? icon("lock") : ""}${n.active ? icon("check") : ""}</button>`;
+  }).join("");
+  const foot = switching ? `Switching to ${esc(wifiWatch.ssid)}…` : "The page drops out for a few seconds while the Pi switches.";
+  const hadFocus = m.contains(document.activeElement);
+  put(m, head + body + `<p class="menu-foot">${foot}</p>`);
+  if (hadFocus || document.activeElement === $("#info-network")) m.querySelector("button:not(:disabled)")?.focus({ preventScroll: true });
+}
+
+async function loadWifi() {
+  const gen = ++wifiScan;
+  renderWifiMenu(true);
+  let list;
+  try { list = await api("/api/wifi", { signal: AbortSignal.timeout(40000) }); }
+  catch (e) { list = wifiList?.networks ? wifiList : { error: e.message }; }
+  if (gen !== wifiScan) return;
+  wifiList = list;
+  renderWifiMenu(false);
+}
+
+/** Keep the menu on screen: it opens to the right of the chip, which can sit near the right edge on a phone. */
+function placeWifiMenu() {
+  const m = $("#wifi-menu");
+  m.style.left = "0px";
+  const over = m.getBoundingClientRect().right - (document.documentElement.clientWidth - 16);
+  if (over > 0) m.style.left = `${-over}px`;
+}
+
+document.addEventListener("click", (e) => {
+  if (e.target.closest("#info-network") && $("#wifi-menu").classList.contains("open")) { placeWifiMenu(); loadWifi(); }
+  const row = e.target.closest("[data-wifi]");
+  if (row && !row.disabled) {
+    const n = wifiList.networks[Number(row.dataset.wifi)];
+    closeMenus();
+    if (!n.active) joinWifi(n);
+  }
+});
+
+$("#wifi-show").addEventListener("change", (e) => { $("#wifi-pass").type = e.target.checked ? "text" : "password"; });
+$("#wifi-cancel").onclick = () => $("#wifi-dialog").close();  // not a submit button, so Enter in the password field joins
+
+async function joinWifi(n) {
+  const now = last?.pi.network?.wifi?.ssid;
+  const needsPass = wifiNeeds(n) === "password" && !n.saved;
+  const dlg = $("#wifi-dialog"), pass = $("#wifi-pass");
+  $("#wifi-title").textContent = `Join ${n.ssid}?`;
+  $("#wifi-body").textContent = `This page drops out for a few seconds while the Pi switches, then reconnects by itself.`
+    + (now ? ` If ${n.ssid} doesn't connect or has no internet, the Pi goes back to ${now} within about a minute.` : "");
+  $("#wifi-pass-row").hidden = !needsPass;
+  pass.value = "";
+  pass.type = "password";
+  $("#wifi-show").checked = false;
+  pass.required = needsPass;
+  pass.minLength = needsPass && !/WEP/.test(n.security) ? 8 : 0;  // WPA passwords are 8 to 63 characters
+  dlg.returnValue = "";
+  dlg.showModal();
+  (needsPass ? pass : $("#wifi-ok")).focus();
+  const ok = await new Promise((resolve) => dlg.addEventListener("close", () => resolve(dlg.returnValue === "ok"), { once: true }));
+  const password = needsPass ? pass.value : "";
+  pass.value = "";
+  if (!ok) return;
+  const before = last?.wifi_switch?.started ?? null;
+  wifiWatch = { ssid: n.ssid, started: null, before, asked: Date.now() };
+  renderWifiMenu(false);
+  if (last) renderOverall(last);
+  try {
+    const sw = await api("/api/wifi", { method: "POST", body: JSON.stringify({ ssid: n.ssid, password }) });
+    wifiWatch = { ...wifiWatch, started: sw.started };
+  } catch (e) {
+    if (e.status) { wifiWatch = null; toast(e.message, true); }  // the Pi said no; otherwise it may have started and dropped us
+  }
+  refresh();
+}
+
+const WIFI_PHASE = {
+  joining: (s) => `Joining ${s.ssid}…`,
+  checking: (s) => `Joined ${s.ssid}. Checking the internet works…`,
+  "going-back": (s) => `${s.ssid} didn't work. Going back to ${s.previous}…`,
+};
+
+/** Follow a switch in /api/state: the banner while it runs, a toast when it's over. */
+function wifiBanner(data) {
+  const sw = data.wifi_switch;
+  if (sw && sw.state !== "done" && wifiWatch?.started !== sw.started && !(wifiWatch && wifiWatch.started === null)) {
+    wifiWatch = { ssid: sw.ssid, started: sw.started, asked: Date.now() - (data.now - sw.started) * 1000 };  // e.g. a reload mid-switch
+  }
+  if (!wifiWatch) return null;
+  const mine = sw && (wifiWatch.started === null ? sw.started !== wifiWatch.before : sw.started === wifiWatch.started);
+  if (!mine) {
+    if (wifiWatch.started !== null || Date.now() - wifiWatch.asked > 20000) {  // pi-dash restarted, or the request never got there
+      toast(`Lost track of the switch to ${wifiWatch.ssid}`, true);
+      wifiWatch = null;
+      return null;
+    }
+    return { html: `<span class="spin small"></span><span class="grow">Asking the Pi to join ${esc(wifiWatch.ssid)}…</span>` };
+  }
+  if (sw.state === "done") {
+    toast(sw.message || (sw.ok ? `Connected to ${sw.ssid}` : `Couldn't join ${sw.ssid}`), !sw.ok);
+    wifiWatch = null;
+    wifiList = null;  // scan again next time
+    if ($("#wifi-menu").classList.contains("open")) loadWifi();
+    return null;
+  }
+  wifiWatch.started = sw.started;
+  const phase = (WIFI_PHASE[sw.state] || WIFI_PHASE.joining)(sw);
+  return { html: `<span class="spin small"></span><span class="grow">${esc(phase)} This page may drop out for a few seconds; it reconnects by itself.</span>` };
+}
+
+/** While the Pi is switching, the page losing it is expected: say so, and after a while, where else to look. */
+function wifiOfflineText() {
+  const ts = last?.pi.network?.tailscale;
+  const hint = Date.now() - wifiWatch.asked > 90000 && ts?.name && !location.hostname.endsWith(".ts.net")
+    ? ` If you opened this page by its local address, that can change on another network: try <b>${esc(ts.name)}</b>.` : "";
+  return `<span class="spin small"></span><span class="grow">Switching Wi-Fi to ${esc(wifiWatch.ssid)}. Waiting for the Pi to come back…${hint}</span>`;
+}
 
 // ---- start ---------------------------------------------------------------------------
 

@@ -1,0 +1,9 @@
+// Template: install.sh fills in @USER@ and installs it as /etc/polkit-1/rules.d/50-pi-dash.rules.
+// Lets pi-dash, which runs as a service with no login session, scan for Wi-Fi and switch networks.
+polkit.addRule(function (action, subject) {
+  if (subject.user == "@USER@" && (action.id == "org.freedesktop.NetworkManager.wifi.scan" ||
+      action.id == "org.freedesktop.NetworkManager.network-control" ||
+      action.id == "org.freedesktop.NetworkManager.settings.modify.system")) {
+    return polkit.Result.YES;
+  }
+});

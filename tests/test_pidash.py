@@ -27,7 +27,7 @@ os.environ["PIDASH_CONFIG"] = str(_config)
 os.environ["STATE_DIRECTORY"] = str(Path(_tmp.name) / "state")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from pidash import auth, config, notify, passwd, scheduled, services, store, system, watch, web  # noqa: E402
+from pidash import auth, config, notify, passwd, scheduled, services, store, system, watch, web, wifi  # noqa: E402
 
 
 class Config(unittest.TestCase):
@@ -300,6 +300,126 @@ class Messages(unittest.TestCase):
         embed = notify.payload(("warn", "t" * 400, "d" * 5000, None, [], ["x" * 3000]))["embeds"][0]
         self.assertLessEqual(len(embed["title"]), 256)
         self.assertLessEqual(len(embed["description"]), 4000)
+
+
+class FakeNetworkManager:
+    """Answers the nmcli calls pidash.wifi makes, from a tiny model: saved networks and the active one."""
+
+    def __init__(self, saved, active, password="right"):
+        self.saved = dict(saved)  # uuid -> network name
+        self.active = active
+        self.password = password
+        self.calls = []
+
+    def __call__(self, *args, timeout=15):
+        self.calls.append(args)
+        a = list(args)
+        if a[:1] == ["--wait"]:
+            a = a[2:]
+        if a == ["-f", "DEVICE,TYPE", "device"]:
+            return 0, "wlan0:wifi\np2p-dev-wlan0:wifi-p2p\neth0:ethernet"
+        if a == ["-f", "UUID,TYPE", "connection", "show"]:
+            return 0, "\n".join(f"{u}:802-11-wireless" for u in self.saved) + "\neth-1:802-3-ethernet"
+        if a[:3] == ["-g", "802-11-wireless.ssid", "connection"]:
+            return (0, self.saved[a[-1]]) if a[-1] in self.saved else (10, "Error: no such connection")
+        if a == ["-f", "UUID,DEVICE", "connection", "show", "--active"]:
+            return 0, f"{self.active}:wlan0\nts-1:tailscale0" if self.active else "ts-1:tailscale0"
+        if a[:3] == ["device", "wifi", "connect"]:
+            uuid = f"new-{a[3]}"
+            self.saved[uuid] = a[3]
+            if "password" in a and a[a.index("password") + 1] != self.password:
+                self.active = ""
+                return 4, "Error: Connection activation failed: Secrets were required, but not provided."
+            self.active = uuid
+            return 0, f"Device 'wlan0' successfully activated with '{uuid}'."
+        if a[:3] == ["connection", "up", "uuid"]:
+            self.active = a[3]
+            return 0, "Connection successfully activated"
+        if a[:3] == ["connection", "delete", "uuid"]:
+            self.saved.pop(a[3], None)
+            self.active = "" if self.active == a[3] else self.active
+            return 0, ""
+        if a[:2] == ["device", "disconnect"]:
+            self.active = ""
+            return 0, ""
+        raise AssertionError(f"unexpected nmcli call: {args}")
+
+
+class Wifi(unittest.TestCase):
+    def switch(self, nm, ssid, password="", online=True):
+        job = {"state": "joining", "ok": None, "message": ""}
+        prev_uuid, prev_name = nm.active, nm.saved.get(nm.active, "")
+        with unittest.mock.patch.object(wifi, "nmcli", nm), unittest.mock.patch.object(wifi, "ONLINE_WAIT", 0.01), \
+                unittest.mock.patch.object(system, "online", return_value=online):
+            wifi._switch(job, "wlan0", ssid, password, prev_uuid, prev_name)
+        return job
+
+    def test_terse_fields_unescape_colons(self):
+        self.assertEqual(system.fields(r"*:Cafe\: 2nd floor:67:WPA2"), ["*", "Cafe: 2nd floor", "67", "WPA2"])
+        self.assertEqual(system.fields(r"a\\b:"), ["a\\b", ""])
+
+    def test_scan_merges_access_points_and_skips_hidden_ones(self):
+        out = "\n".join([" :Cafe:40:WPA2", "*:home:70:WPA2", " :Cafe:81:WPA2", " ::90:WPA2", " :Library:30:--"])
+        nets = wifi.parse_scan(out, {"home": "u1"})
+        self.assertEqual([n["ssid"] for n in nets], ["home", "Cafe", "Library"])  # the one in use first
+        self.assertEqual(nets[0], {"ssid": "home", "signal": 70, "security": "WPA2", "active": True, "saved": True})
+        self.assertEqual(nets[1]["signal"], 81)
+        self.assertEqual(nets[2]["security"], "")
+
+    def test_nmcli_errors_in_words(self):
+        self.assertEqual(wifi.reason("Error: Connection activation failed: Secrets were required, but not provided."),
+                         "Wrong password")
+        self.assertEqual(wifi.reason("Error: No network with SSID 'x' found."), "Out of range")
+        self.assertEqual(wifi.reason("Error: Timeout expired (45 seconds)"), "Took too long to connect")
+        self.assertEqual(wifi.reason("Error: something new"), "something new")
+
+    def test_joins_a_new_network(self):
+        nm = FakeNetworkManager({"h": "home"}, "h")
+        job = self.switch(nm, "Cafe", "right")
+        self.assertTrue(job["ok"])
+        self.assertEqual(nm.active, "new-Cafe")
+        self.assertIn("new-Cafe", nm.saved)
+
+    def test_wrong_password_goes_back_and_forgets_the_new_network(self):
+        nm = FakeNetworkManager({"h": "home"}, "h")
+        job = self.switch(nm, "Cafe", "nope")
+        self.assertFalse(job["ok"])
+        self.assertEqual(job["message"], "Wrong password, so the Pi went back to home")
+        self.assertEqual(nm.active, "h")
+        self.assertEqual(nm.saved, {"h": "home"})
+
+    def test_no_internet_goes_back(self):
+        nm = FakeNetworkManager({"h": "home"}, "h")
+        job = self.switch(nm, "Cafe", "right", online=False)
+        self.assertEqual(job["message"], "Cafe has no internet, so the Pi went back to home")
+        self.assertEqual(nm.active, "h")
+        self.assertEqual(nm.saved, {"h": "home"})
+
+    def test_a_saved_network_is_kept_when_it_fails(self):
+        nm = FakeNetworkManager({"h": "home", "o": "office"}, "h")
+        job = self.switch(nm, "office", online=False)
+        self.assertFalse(job["ok"])
+        self.assertEqual(nm.active, "h")
+        self.assertIn("o", nm.saved)
+        self.assertIn(("--wait", str(wifi.JOIN_WAIT), "connection", "up", "uuid", "o", "ifname", "wlan0"), nm.calls)
+
+    def test_start_refuses_the_current_network_and_a_second_switch(self):
+        nm = FakeNetworkManager({"h": "home"}, "h")
+        with unittest.mock.patch.object(wifi, "nmcli", nm), unittest.mock.patch.object(wifi, "switch", None):
+            with self.assertRaisesRegex(ValueError, "Already on home"):
+                wifi.start("home")
+            with unittest.mock.patch.object(wifi, "switch", {"ssid": "Cafe", "state": "joining"}):
+                with self.assertRaisesRegex(ValueError, "Already switching to Cafe"):
+                    wifi.start("office")
+
+    def test_a_finished_switch_is_recorded(self):
+        nm = FakeNetworkManager({"h": "home"}, "h")
+        job = {"ssid": "Cafe", "state": "joining", "ok": None, "message": ""}
+        with unittest.mock.patch.object(wifi, "nmcli", nm), unittest.mock.patch.object(system, "online", return_value=True), \
+                unittest.mock.patch.object(notify, "alert") as alert:
+            wifi._run(job, "wlan0", "Cafe", "right", "h", "home")
+        self.assertEqual(job["state"], "done")
+        alert.assert_called_once_with("info", "Switched Wi-Fi to Cafe from the dashboard", "Was on home.", discord=False)
 
 
 class PiStatus(unittest.TestCase):

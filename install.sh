@@ -53,6 +53,11 @@ fill "$DIR/deploy/sudoers" > "$SUDOERS"
 sudo visudo -cf "$SUDOERS" >/dev/null
 sudo install -m 440 "$SUDOERS" /etc/sudoers.d/pi-dash
 
+# Let the dashboard switch Wi-Fi networks (NetworkManager asks polkit; polkit picks the rule up by itself).
+if command -v nmcli >/dev/null && sudo test -d /etc/polkit-1/rules.d; then
+  fill "$DIR/deploy/polkit.rules" | sudo tee /etc/polkit-1/rules.d/50-pi-dash.rules >/dev/null
+fi
+
 # Keep your systemd --user services (kind "systemd-user") running when you're logged out.
 sudo loginctl enable-linger "$USER_NAME"
 

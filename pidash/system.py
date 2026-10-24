@@ -131,6 +131,11 @@ def _cached(key, ttl, fn):
     return _slow[key]
 
 
+def forget(key):
+    """Drop a cached result, so the next snapshot asks again."""
+    _slow_at.pop(key, None)
+
+
 def meminfo():
     info = {}
     for line in Path("/proc/meminfo").read_text().splitlines():
@@ -168,6 +173,23 @@ def boot_id() -> str:
     return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
 
 
+def fields(line: str) -> list[str]:
+    """One line of `nmcli -t` output -> its fields. nmcli writes a ':' inside a value as '\\:', and '\\' as '\\\\'."""
+    out, cur, escaped = [], "", False
+    for ch in line:
+        if escaped:
+            cur += ch
+            escaped = False
+        elif ch == "\\":
+            escaped = True
+        elif ch == ":":
+            out.append(cur)
+            cur = ""
+        else:
+            cur += ch
+    return out + [cur]
+
+
 def _network():
     addrs = {}
     try:
@@ -179,9 +201,9 @@ def _network():
         pass
     wifi = None
     for line in run(["nmcli", "-t", "-f", "ACTIVE,SSID,SIGNAL", "dev", "wifi"]).splitlines():
-        active, *rest = line.split(":")
-        if active == "yes":
-            wifi = {"ssid": ":".join(rest[:-1]), "signal": int(rest[-1] or 0)}
+        f = fields(line)
+        if len(f) == 3 and f[0] == "yes":
+            wifi = {"ssid": f[1], "signal": int(f[2] or 0)}
     tailscale = None
     try:
         ts = json.loads(run(["tailscale", "status", "--json"]) or "{}")

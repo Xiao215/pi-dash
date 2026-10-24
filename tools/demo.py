@@ -176,6 +176,35 @@ def state(trouble):
     }
 
 
+WIFI = [
+    {"ssid": "home-wifi", "signal": 71, "security": "WPA2", "active": True, "saved": True},
+    {"ssid": "home-wifi-5G", "signal": 64, "security": "WPA2 WPA3", "active": False, "saved": True},
+    {"ssid": "Bell 482", "signal": 52, "security": "WPA2", "active": False, "saved": False},
+    {"ssid": "Library Guest", "signal": 38, "security": "OWE", "active": False, "saved": False},
+    {"ssid": "eduroam", "signal": 33, "security": "WPA2 802.1X", "active": False, "saved": False},
+    {"ssid": "DIRECT-7f-HP OfficeJet", "signal": 22, "security": "WPA2", "active": False, "saved": False},
+]
+wifi_switch = None  # a pretend switch: joins, drops the page for a few seconds, then works (a password starting "wrong" fails)
+
+
+def wifi_state():
+    """Move the pretend switch along by the clock; True while the Pi would be unreachable."""
+    sw = wifi_switch
+    if not sw or sw["state"] == "done":
+        return False
+    t = time.time() - sw["started"]
+    if t > 14:
+        sw.update(state="done", finished=time.time(), ok=not sw["fail"],
+                  message=f"Wrong password, so the Pi went back to {sw['previous']}" if sw["fail"] else f"Connected to {sw['ssid']}")
+        if sw["ok"]:
+            for n in WIFI:
+                n["active"] = n["ssid"] == sw["ssid"]
+                n["saved"] |= n["active"]
+    elif t > 10:
+        sw["state"] = "going-back" if sw["fail"] else "checking"
+    return 2 < t < 10
+
+
 LOG = [
     "INFO discord.client: logging in using static token",
     "INFO bot.web: Health server listening on :8080",
@@ -211,7 +240,15 @@ class Handler(BaseHTTPRequestHandler):
             ctype = {"css": "text/css", "js": "text/javascript", "svg": "image/svg+xml", "html": "text/html", "png": "image/png"}.get(path.rsplit(".", 1)[-1], "text/plain")
             return self._send((STATIC / path[8:]).read_bytes(), ctype + "; charset=utf-8")
         if path == "/api/state":
-            return self._send(state(self.trouble))
+            if wifi_state():
+                return self._send({"error": "switching"}, code=503)
+            st = state(self.trouble)
+            active = next(n for n in WIFI if n["active"])
+            st["pi"]["network"]["wifi"] = {"ssid": active["ssid"], "signal": active["signal"]}
+            return self._send({**st, "wifi_switch": wifi_switch})
+        if path == "/api/wifi":
+            time.sleep(1.2)  # scanning
+            return self._send({"device": "wlan0", "networks": WIFI})
         if path.endswith("/history"):
             name = path.split("/")[3]
             rng = parse_qs(urlparse(self.path).query).get("range", ["24h"])[0]
@@ -236,6 +273,13 @@ class Handler(BaseHTTPRequestHandler):
         self._send({"error": "not found"}, code=404)
 
     def do_POST(self):
+        global wifi_switch
+        if urlparse(self.path).path == "/api/wifi":
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+            wifi_switch = {"ssid": body["ssid"], "previous": next(n["ssid"] for n in WIFI if n["active"]), "state": "joining",
+                           "ok": None, "message": "", "started": time.time(), "finished": None,
+                           "fail": body.get("password", "").startswith("wrong")}
+            return self._send(wifi_switch)
         self._send({"id": "1", "ok": True, "muted_until": 0})
 
 
