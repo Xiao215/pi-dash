@@ -506,7 +506,12 @@ body.offline main { opacity: .55; filter: grayscale(.4); }
 /* ---- the assistant ---- */
 .btn.ask { gap: 7px; padding: 0 12px 0 10px; }
 .btn.ask .i { color: var(--info); }
-.btn.ask { position: relative; }
+.btn.ask { position: relative; transition: opacity .3s var(--ease); }
+.btn.ask.checking { opacity: .55; }
+.btn.ask.checking .i { animation: blink 1.4s ease-in-out infinite; }
+.btn.ask.off { opacity: .45; cursor: default; }
+.btn.ask.off .i { color: var(--muted); }
+.btn.ask.off:hover { background: var(--surface); border-color: var(--border); }
 .btn.ask.attn::after { content: ""; position: absolute; top: 5px; right: 5px; width: 7px; height: 7px; border-radius: 50%;
   background: var(--info); box-shadow: 0 0 0 2px var(--surface); }
 .recent .t.wait { display: inline-flex; align-items: center; gap: 6px; color: var(--info); }

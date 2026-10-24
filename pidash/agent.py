@@ -8,6 +8,7 @@ pi-dash (or an upgrade doing it) can't cut them off halfway. Each runs in a term
 written and prompts show; its log is read back from a file, and what you type on the card goes in through a FIFO."""
 
 import getpass
+import importlib.util
 import json
 import logging
 import os
@@ -115,11 +116,18 @@ _working: set[str] = set()  # chats whose worker thread is running
 # ---- the API client (tests swap _client for a fake) ----
 
 def _sdk_problem() -> str:
+    # Only whether it's there: importing it takes seconds on a Pi, and this answers every page load.
+    if importlib.util.find_spec("anthropic") is None:
+        return "The anthropic package isn't installed. Run ./install.sh again and turn the assistant on."
+    return ""
+
+
+def _warm_up():
+    """Import the SDK in the background at startup, so the first question doesn't wait seconds for it."""
     try:
         import anthropic  # noqa: F401
     except ImportError:
-        return "The anthropic package isn't installed. Run ./install.sh again and turn the assistant on."
-    return ""
+        pass
 
 
 def _client():
@@ -963,6 +971,7 @@ def _ran(cid, call, lines, exit_code, audit=True):
 def start():
     """Pick up where things were before pi-dash (re)started."""
     DIR.mkdir(parents=True, exist_ok=True)
+    threading.Thread(target=_warm_up, name="agent-warm-up", daemon=True).start()
     prune()
     with _lock:
         for chat in _all():

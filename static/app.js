@@ -845,8 +845,10 @@ function render(data) {
   renderFeed(data.events, data.now);
   renderOverall(data);
   const ask = $("#ask-btn");
-  ask.classList.toggle("attn", data.assistant_waiting > 0);
-  ask.title = data.assistant_waiting ? "A chat is waiting for you" : "Ask the assistant (/)";
+  if (!askOff && !ask.classList.contains("checking")) {  // a greyed-out button keeps saying why
+    ask.classList.toggle("attn", data.assistant_waiting > 0);
+    ask.title = data.assistant_waiting ? "A chat is waiting for you" : "Ask the assistant (/)";
+  }
   if (page) renderPage(data);
   if (firstRender) document.body.classList.remove("loading");
 }
@@ -1552,11 +1554,23 @@ let replyDraft = { call: null, text: "" };  // what's typed in a running command
 const openSteps = new Set(), openOutput = new Set();  // "Looked at" boxes and outputs left open
 const RISKY = /connection|Restarts|off|secrets/;
 
+let askOff = "";  // why the Ask button is greyed out, or "" when it works
+
 async function loadAgent() {
-  try { agentInfo = await api("/api/agent"); } catch { agentInfo = null; }  // refused off Tailscale: no assistant
-  const on = Boolean(agentInfo?.on);
-  $("#ask-btn").hidden = !on;
-  document.body.classList.toggle("has-assistant", on);
+  let why = "";
+  try {
+    agentInfo = await api("/api/agent");
+    why = agentInfo.on ? "" : agentInfo.problem;
+  } catch (e) {
+    agentInfo = null;
+    why = e.status === 403 ? "The assistant only answers over Tailscale." : "Couldn't reach the assistant.";
+  }
+  askOff = why;
+  const b = $("#ask-btn");
+  cls(b, `btn ask${why ? " off" : b.classList.contains("attn") ? " attn" : ""}`);
+  b.title = why || "Ask the assistant (/)";
+  b.setAttribute("aria-disabled", why ? "true" : "false");
+  document.body.classList.toggle("has-assistant", !why);
 }
 
 const agentOpen = () => agentEl.classList.contains("open");
@@ -1886,7 +1900,11 @@ askInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); submitAsk(); }
 });
 askInput.addEventListener("input", () => { autosize(); syncComposer(); });
-$("#ask-btn").onclick = () => openAgent();
+$("#ask-btn").onclick = () => {
+  const b = $("#ask-btn");
+  if (b.classList.contains("off")) return toast(askOff, true);
+  openAgent();  // also while still checking: the panel says what it finds
+};
 $("#agent-close").onclick = closeAgent;
 $("#agent-new").onclick = async () => { await loadAgent(); showHome(); };
 $("#agent-ctx").addEventListener("click", (e) => {
@@ -1968,7 +1986,7 @@ document.addEventListener("click", (e) => {
 });
 
 document.addEventListener("keydown", (e) => {
-  if (e.key !== "/" || e.metaKey || e.ctrlKey || e.altKey || agentOpen() || $("#ask-btn").hidden) return;
+  if (e.key !== "/" || e.metaKey || e.ctrlKey || e.altKey || agentOpen() || askOff) return;
   if (e.target.closest("input, textarea, select, [contenteditable]") || $("dialog[open]")) return;
   e.preventDefault();
   openAgent();
