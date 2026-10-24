@@ -89,7 +89,8 @@ def networks() -> dict:
 def reason(out: str) -> str:
     """nmcli's error, in words for the page."""
     low = out.lower()
-    if any(s in low for s in ("secrets were required", "passwords or encryption keys", "psk: property is invalid")):
+    if any(s in low for s in ("secrets were required", "passwords or encryption keys", "psk: property is invalid",
+                              "802.1x supplicant")):
         return "Wrong password"
     if "no network with ssid" in low:
         return "Out of range"
@@ -102,8 +103,9 @@ def reason(out: str) -> str:
     return line.removeprefix("Error: ") or "nmcli failed"
 
 
-def start(ssid: str, password: str = "") -> dict:
-    """Begin switching to `ssid`; the work goes on in the background. Raises ValueError when it can't start."""
+def start(ssid: str, password: str = "", username: str = "") -> dict:
+    """Begin switching to `ssid`; the work goes on in the background. Raises ValueError when it can't start.
+    A username means an enterprise (802.1X) network, signed in to with it and the password."""
     global switch
     with _lock:
         if switch and switch["state"] != "done":
@@ -117,13 +119,14 @@ def start(ssid: str, password: str = "") -> dict:
         switch = {"ssid": ssid, "previous": prev_name, "state": "joining", "ok": None, "message": "",
                   "started": time.time(), "finished": None}
         job = switch
-    threading.Thread(target=_run, args=(job, dev, ssid, password, prev_uuid, prev_name), name="wifi", daemon=True).start()
+    threading.Thread(target=_run, args=(job, dev, ssid, password, prev_uuid, prev_name, username), name="wifi",
+                     daemon=True).start()
     return job
 
 
-def _run(job, dev, ssid, password, prev_uuid, prev_name):
+def _run(job, dev, ssid, password, prev_uuid, prev_name, username=""):
     try:
-        _switch(job, dev, ssid, password, prev_uuid, prev_name)
+        _switch(job, dev, ssid, password, prev_uuid, prev_name, username)
     except Exception as e:  # noqa: BLE001 - finish, or the page would wait on this switch forever
         log.exception("wifi switch")
         job.update(ok=False, message=f"pi-dash: {e}")
@@ -136,15 +139,24 @@ def _run(job, dev, ssid, password, prev_uuid, prev_name):
         notify.alert("warn", f"Couldn't switch Wi-Fi to {ssid}", job["message"])
 
 
-def _switch(job, dev, ssid, password, prev_uuid, prev_name):
+def _switch(job, dev, ssid, password, prev_uuid, prev_name, username=""):
     saved = saved_networks()
     new_profile = ssid not in saved
-    if new_profile:
-        # The password is on nmcli's command line for a few seconds; on a one-person Pi only you can see that.
+    code, out = 0, ""
+    # Passwords are on nmcli's command line for a few seconds; on a one-person Pi only you can see that.
+    if new_profile and username:
+        # Enterprise: a profile with the sign-in first. PEAP or TTLS with MSCHAPv2 is what most of them use
+        # (eduroam, offices). The Pi has no CA certificate to check the network against; the page says so.
+        code, out = nmcli("connection", "add", "type", "wifi", "ifname", dev, "con-name", ssid, "ssid", ssid,
+                          "wifi-sec.key-mgmt", "wpa-eap", "802-1x.eap", "peap,ttls", "802-1x.phase2-auth", "mschapv2",
+                          "802-1x.identity", username, "802-1x.password", password)
+        cmd = ["connection", "up", "uuid", saved_networks().get(ssid, ""), "ifname", dev]
+    elif new_profile:
         cmd = ["device", "wifi", "connect", ssid, *(["password", password] if password else []), "ifname", dev]
     else:
         cmd = ["connection", "up", "uuid", saved[ssid], "ifname", dev]
-    code, out = nmcli("--wait", str(JOIN_WAIT), *cmd, timeout=JOIN_WAIT + 15)
+    if code == 0:
+        code, out = nmcli("--wait", str(JOIN_WAIT), *cmd, timeout=JOIN_WAIT + 15)
     if code == 0:
         job["state"] = "checking"
         deadline = time.monotonic() + ONLINE_WAIT
@@ -156,6 +168,8 @@ def _switch(job, dev, ssid, password, prev_uuid, prev_name):
         problem = f"{ssid} has no internet"
     else:
         problem = reason(out)
+        if username and problem == "Wrong password":
+            problem = "Wrong username or password"
     job["state"] = "going-back"
     if new_profile:  # don't leave a profile with a wrong password behind for NetworkManager to retry
         new_uuid = saved_networks().get(ssid)

@@ -202,11 +202,16 @@
       <h3 id="wifi-title"></h3>
       <p id="wifi-body" class="muted"></p>
       <div id="wifi-pass-row">
+        <label class="field" id="wifi-user-field">
+          <span class="sr-only">Username</span>
+          <input id="wifi-user" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Username">
+        </label>
         <label class="field">
-          <span class="sr-only">Wi-Fi password</span>
-          <input id="wifi-pass" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Wi-Fi password">
+          <span class="sr-only">Password</span>
+          <input id="wifi-pass" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Password">
         </label>
         <label class="check"><input type="checkbox" id="wifi-show"> Show password</label>
+        <p class="muted small" id="wifi-cert-note">The Pi can't check this network's certificate, so sign in only where you trust it's the real one.</p>
       </div>
       <div class="dialog-actions">
         <button class="btn" type="button" id="wifi-cancel">Cancel</button>

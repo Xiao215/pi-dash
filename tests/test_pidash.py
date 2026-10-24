@@ -306,10 +306,11 @@ class Messages(unittest.TestCase):
 class FakeNetworkManager:
     """Answers the nmcli calls pidash.wifi makes, from a tiny model: saved networks and the active one."""
 
-    def __init__(self, saved, active, password="right"):
+    def __init__(self, saved, active, password="right", username="me"):
         self.saved = dict(saved)  # uuid -> network name
         self.active = active
-        self.password = password
+        self.password, self.username = password, username
+        self.signins = {}  # uuid -> (username, password) of enterprise profiles
         self.calls = []
 
     def __call__(self, *args, timeout=15):
@@ -333,7 +334,16 @@ class FakeNetworkManager:
                 return 4, "Error: Connection activation failed: Secrets were required, but not provided."
             self.active = uuid
             return 0, f"Device 'wlan0' successfully activated with '{uuid}'."
+        if a[:2] == ["connection", "add"]:  # an enterprise profile: the sign-in is checked when it's brought up
+            name = a[a.index("ssid") + 1]
+            uuid = f"new-{name}"
+            self.saved[uuid] = name
+            self.signins[uuid] = (a[a.index("802-1x.identity") + 1], a[a.index("802-1x.password") + 1])
+            return 0, f"Connection '{name}' ({uuid}) successfully added."
         if a[:3] == ["connection", "up", "uuid"]:
+            if self.signins.get(a[3], (self.username, self.password)) != (self.username, self.password):
+                self.active = ""
+                return 4, "Error: Connection activation failed: (7) Secrets were required, but not provided."
             self.active = a[3]
             return 0, "Connection successfully activated"
         if a[:3] == ["connection", "delete", "uuid"]:
@@ -347,13 +357,28 @@ class FakeNetworkManager:
 
 
 class Wifi(unittest.TestCase):
-    def switch(self, nm, ssid, password="", online=True):
+    def switch(self, nm, ssid, password="", online=True, username=""):
         job = {"state": "joining", "ok": None, "message": ""}
         prev_uuid, prev_name = nm.active, nm.saved.get(nm.active, "")
         with unittest.mock.patch.object(wifi, "nmcli", nm), unittest.mock.patch.object(wifi, "ONLINE_WAIT", 0.01), \
                 unittest.mock.patch.object(system, "online", return_value=online):
-            wifi._switch(job, "wlan0", ssid, password, prev_uuid, prev_name)
+            wifi._switch(job, "wlan0", ssid, password, prev_uuid, prev_name, username)
         return job
+
+    def test_signs_in_to_an_enterprise_network(self):
+        nm = FakeNetworkManager({"h": "home"}, "h")
+        job = self.switch(nm, "eduroam", "right", username="me")
+        self.assertTrue(job["ok"])
+        self.assertEqual(nm.active, "new-eduroam")
+        add = next(c for c in nm.calls if c[:2] == ("connection", "add"))
+        self.assertEqual(add[add.index("wifi-sec.key-mgmt") + 1], "wpa-eap")
+
+    def test_a_wrong_enterprise_sign_in_goes_back_and_forgets_it(self):
+        nm = FakeNetworkManager({"h": "home"}, "h")
+        job = self.switch(nm, "eduroam", "nope", username="me")
+        self.assertEqual(job["message"], "Wrong username or password, so the Pi went back to home")
+        self.assertEqual(nm.active, "h")
+        self.assertEqual(nm.saved, {"h": "home"})
 
     def test_terse_fields_unescape_colons(self):
         self.assertEqual(system.fields(r"*:Cafe\: 2nd floor:67:WPA2"), ["*", "Cafe: 2nd floor", "67", "WPA2"])

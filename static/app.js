@@ -1396,8 +1396,8 @@ function bars(signal) {
     .map((h, i) => `<rect x="${0.5 + i * 4}" y="${15 - h}" width="3" height="${h}" rx="1"${i < lit ? ' class="lit"' : ""}/>`).join("")}</svg>`;
 }
 
-/** What joining takes: "open" (OWE included: encrypted, no password), "password", or "login" (802.1X, which needs
- *  a username and certificates; set that up on the Pi with nmcli, and once saved it can be picked here). */
+/** What joining takes: "open" (OWE included: encrypted, no password), "password", or "login" (802.1X: a username
+ *  and password of your own, as at offices and universities). */
 const wifiNeeds = (n) => (/802\.1X/.test(n.security) ? "login" : /WPA|WEP/.test(n.security) ? "password" : "open");
 
 function renderWifiMenu(scanning) {
@@ -1410,15 +1410,13 @@ function renderWifiMenu(scanning) {
   else if (!wifiList.device) body = `<p class="menu-note">This machine has no Wi-Fi.</p>`;
   else if (!wifiList.networks.length) body = `<p class="menu-note">No networks in range.</p>`;
   else body = wifiList.networks.map((n, i) => {
-    const needs = wifiNeeds(n), unsupported = needs === "login" && !n.saved;
-    const what = [`${n.signal}% signal`, n.security || "open", n.saved && !n.active ? "saved" : "",
-      unsupported ? "needs a username: set it up on the Pi with nmcli" : ""].filter(Boolean).join(" · ");
-    return `<button role="menuitem" class="wifi-row${n.active ? " on" : ""}" data-wifi="${i}" title="${esc(what)}"${switching || unsupported ? " disabled" : ""}>
-      ${bars(n.signal)}<span class="name">${esc(n.ssid)}</span>${n.saved && !n.active ? `<span class="saved">Saved</span>` : unsupported ? `<span class="saved">Needs login</span>` : ""}${needs !== "open" ? icon("lock") : ""}${n.active ? icon("check") : ""}</button>`;
+    const needs = wifiNeeds(n);
+    const what = [`${n.signal}% signal`, n.security || "open", n.saved && !n.active ? "saved" : ""].filter(Boolean).join(" · ");
+    return `<button role="menuitem" class="wifi-row${n.active ? " on" : ""}" data-wifi="${i}" title="${esc(what)}"${switching ? " disabled" : ""}>
+      ${bars(n.signal)}<span class="name">${esc(n.ssid)}</span>${n.saved && !n.active ? `<span class="saved">Saved</span>` : ""}${needs !== "open" ? icon("lock") : ""}${n.active ? icon("check") : ""}</button>`;
   }).join("");
-  const foot = switching ? `Switching to ${esc(wifiWatch.ssid)}…` : "The page drops out for a few seconds while the Pi switches.";
   const hadFocus = m.contains(document.activeElement);
-  put(m, head + body + `<p class="menu-foot">${foot}</p>`);
+  put(m, head + body);
   if (hadFocus || document.activeElement === $("#info-network")) m.querySelector("button:not(:disabled)")?.focus({ preventScroll: true });
 }
 
@@ -1456,22 +1454,26 @@ $("#wifi-cancel").onclick = () => $("#wifi-dialog").close();  // not a submit bu
 
 async function joinWifi(n) {
   const now = last?.pi.network?.wifi?.ssid;
-  const needsPass = wifiNeeds(n) === "password" && !n.saved;
-  const dlg = $("#wifi-dialog"), pass = $("#wifi-pass");
+  const login = wifiNeeds(n) === "login" && !n.saved;
+  const needsPass = login || (wifiNeeds(n) === "password" && !n.saved);
+  const dlg = $("#wifi-dialog"), pass = $("#wifi-pass"), user = $("#wifi-user");
   $("#wifi-title").textContent = `Join ${n.ssid}?`;
   $("#wifi-body").textContent = `This page drops out for a few seconds while the Pi switches, then reconnects by itself.`
     + (now ? ` If ${n.ssid} doesn't connect or has no internet, the Pi goes back to ${now} within about a minute.` : "");
   $("#wifi-pass-row").hidden = !needsPass;
+  $("#wifi-user-field").hidden = $("#wifi-cert-note").hidden = !login;
+  user.value = "";
+  user.required = login;
   pass.value = "";
   pass.type = "password";
   $("#wifi-show").checked = false;
   pass.required = needsPass;
-  pass.minLength = needsPass && !/WEP/.test(n.security) ? 8 : 0;  // WPA passwords are 8 to 63 characters
+  pass.minLength = needsPass && !login && !/WEP/.test(n.security) ? 8 : 0;  // WPA passwords are 8 to 63 characters
   dlg.returnValue = "";
   dlg.showModal();
-  (needsPass ? pass : $("#wifi-ok")).focus();
+  (login ? user : needsPass ? pass : $("#wifi-ok")).focus();
   const ok = await new Promise((resolve) => dlg.addEventListener("close", () => resolve(dlg.returnValue === "ok"), { once: true }));
-  const password = needsPass ? pass.value : "";
+  const password = needsPass ? pass.value : "", username = login ? user.value.trim() : "";
   pass.value = "";
   if (!ok) return;
   const before = last?.wifi_switch?.started ?? null;
@@ -1479,7 +1481,7 @@ async function joinWifi(n) {
   renderWifiMenu(false);
   if (last) renderOverall(last);
   try {
-    const sw = await api("/api/wifi", { method: "POST", body: JSON.stringify({ ssid: n.ssid, password }) });
+    const sw = await api("/api/wifi", { method: "POST", body: JSON.stringify({ ssid: n.ssid, password, username }) });
     wifiWatch = { ...wifiWatch, started: sw.started };
   } catch (e) {
     if (e.status) { wifiWatch = null; toast(e.message, true); }  // the Pi said no; otherwise it may have started and dropped us

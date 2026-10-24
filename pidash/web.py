@@ -332,11 +332,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": True})
         if parts == ["api", "wifi"]:
             body = self._body()
-            ssid, password = body.get("ssid"), body.get("password", "")
-            if not isinstance(ssid, str) or not ssid or not isinstance(password, str):
+            ssid, password, username = body.get("ssid"), body.get("password", ""), body.get("username", "")
+            if not isinstance(ssid, str) or not ssid or not isinstance(password, str) or not isinstance(username, str):
                 return self._json({"error": "pick a network"}, 400)
             try:
-                return self._json(wifi.start(ssid, password))
+                return self._json(wifi.start(ssid, password, username))
             except ValueError as e:
                 return self._json({"error": str(e)}, 409)
         if parts == ["api", "test-alert"]:
