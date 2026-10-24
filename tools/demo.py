@@ -148,7 +148,7 @@ def state(trouble):
                  "Traceback (most recent call last):", '  File "/app/bot.py", line 88, in on_message',
                  "    reply = await llm.answer(message)", "TimeoutError: the model took longer than 90 s"]},
         {"t": now - 26 * 3600, "level": "boot", "title": "Pi restarted", "service": None,
-         "detail": "Reason: scheduled restart after an automatic update.\nWas down for about 48 s."},
+         "detail": f"Reason: scheduled restart after an automatic update.\nIt was off for about 48 s, from <t:{int(now - 26 * 3600 - 48)}:f>."},
         {"t": now - 2 * 86400, "level": "warn", "title": "Disk 82% full", "service": None,
          "detail": "5.1 GB left on the SD card."},
     ]

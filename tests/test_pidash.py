@@ -2,6 +2,7 @@
 
 import json
 import os
+import queue
 import sys
 import tempfile
 import time
@@ -420,6 +421,102 @@ class Wifi(unittest.TestCase):
             wifi._run(job, "wlan0", "Cafe", "right", "h", "home")
         self.assertEqual(job["state"], "done")
         alert.assert_called_once_with("info", "Switched Wi-Fi to Cafe from the dashboard", "Was on home.", discord=False)
+
+
+class Backlog(unittest.TestCase):
+    """Alerts that pile up while Discord can't be reached go out once per kind, with their own times."""
+
+    def alert(self, title, service="xiap", group=None, at=0.0, detail=""):
+        return notify.Alert("error", title, detail, service, [], [], at, group)
+
+    def test_piled_up_alerts_go_out_once_per_kind_in_order(self):
+        held = [self.alert("xiap crashed", group="crash"),
+                self.alert("Internet was down", service=None),
+                *(self.alert("xiap keeps crashing", group="crash", detail=f"{4 + i} crashes") for i in range(10)),
+                self.alert("Errors in xiap's log"), self.alert("Errors in xiap's log")]
+        out = notify.collapse(held)
+        self.assertEqual([a.title for a in out], ["xiap keeps crashing", "Internet was down", "Errors in xiap's log"])
+        self.assertEqual([a.repeats for a in out], [10, 0, 1])
+        self.assertEqual(out[0].detail, "13 crashes")
+        self.assertEqual(notify.collapse(out), out)  # collapsing again while still offline keeps the counts
+        self.assertIn("+10 more like this", notify.payload(out[0])["embeds"][0]["description"])
+        self.assertNotIn("more like this", notify.payload(out[1])["embeds"][0]["description"])
+
+    def test_an_alert_keeps_the_time_it_happened(self):
+        embed = notify.payload(self.alert("x", at=time.monotonic() - 3600))["embeds"][0]
+        from datetime import datetime
+        self.assertAlmostEqual(datetime.fromisoformat(embed["timestamp"]).timestamp(), time.time() - 3600, delta=2)
+        self.assertEqual(notify.when(time.time() - 60)[-3:], ":t>")
+        self.assertEqual(notify.when(time.time() - 3 * 86400)[-3:], ":f>")
+
+    def test_sender_holds_alerts_while_offline_then_sends_them_merged(self):
+        class Done(Exception):
+            pass
+
+        class Outbox(queue.Queue):
+            def get(self, block=True, timeout=None):  # ends the sender once everything went out
+                if block and self.empty():
+                    raise Done
+                return super().get(block, timeout)
+        q = Outbox()
+        q.put(self.alert("xiap crashed", group="crash"))
+        more = [self.alert("xiap keeps crashing", group="crash"), self.alert("Pi restarted", service=None),
+                self.alert("xiap keeps crashing", group="crash")]
+        sent, failed = [], []
+
+        def post(body):
+            if not failed:
+                failed.append(body)
+                return False  # offline
+            sent.append(body["embeds"][0])
+            return True
+
+        def sleep(_):
+            while more:
+                q.put(more.pop(0))
+
+        with unittest.mock.patch.object(notify, "_outbox", q), unittest.mock.patch.object(notify, "_post", post), \
+                unittest.mock.patch.object(notify.time, "sleep", sleep):
+            with self.assertRaises(Done):
+                notify._sender()
+        self.assertEqual([e["title"][2:] for e in sent], ["xiap keeps crashing", "Pi restarted"])
+        self.assertIn("+2 more like this", sent[0]["description"])
+
+    def test_a_crash_loop_alerts_once_then_once_more_every_10_minutes(self):
+        start = time.time()
+        with unittest.mock.patch.object(watch, "alert") as alert:
+            for i in range(40):  # a crash every 20 s for 13 minutes
+                with unittest.mock.patch.object(watch.time, "time", return_value=start + 20 * i):
+                    watch._crashed("loopy", "Exited with code 1.", None)
+        self.assertEqual([c.args[1] for c in alert.call_args_list],
+                         ["loopy crashed", "loopy keeps crashing", "loopy keeps crashing"])
+        self.assertEqual({c.kwargs["group"] for c in alert.call_args_list}, {"crash"})
+
+    def internet(self, rounds, uptime, synced=True):
+        """Feed _internet (online, monotonic time) rounds; returns the alerts it made."""
+        outage = None
+        with unittest.mock.patch.object(watch, "alert") as alert, \
+                unittest.mock.patch.object(system, "uptime", return_value=uptime), \
+                unittest.mock.patch.object(watch, "_clock_synced", side_effect=synced if isinstance(synced, list) else None,
+                                           return_value=synced):
+            for online, mono in rounds:
+                with unittest.mock.patch("time.monotonic", return_value=mono):
+                    outage = watch._internet(online, outage)
+        self.assertIsNone(outage)
+        return [(c.args[1], c.args[2]) for c in alert.call_args_list]
+
+    def test_no_internet_after_a_restart_isnt_called_an_outage(self):
+        # started offline (the restart alert covers the time the Pi was off), online after 5 min, clock set a round later
+        alerts = self.internet([(False, 100), (False, 200), (True, 400), (True, 460)], uptime=20, synced=[False, True])
+        self.assertEqual(len(alerts), 1)
+        self.assertEqual(alerts[0][0], "No internet after the restart")
+        self.assertTrue(alerts[0][1].startswith("It took 5 min to get online, until <t:"))
+
+    def test_internet_outage_while_running(self):
+        alerts = self.internet([(False, 1000), (True, 1180)], uptime=50_000)
+        self.assertEqual(alerts[0][0], "Internet was down")
+        self.assertRegex(alerts[0][1], r"^For about 3 min, from <t:\d+:t> to <t:\d+:t>\.")
+        self.assertEqual(self.internet([(False, 1000), (True, 1060)], uptime=50_000), [])  # a blip: not worth an alert
 
 
 class PiStatus(unittest.TestCase):

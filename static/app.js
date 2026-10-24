@@ -44,6 +44,9 @@ function ago(t, now = Date.now() / 1000) {
 const clock = (t) => new Date(t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
 const hm = (t) => new Date(t * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 const dayHm = (t) => new Date(t * 1000).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" });
+/** Alert text marks moments the way Discord does (<t:1792794850:t>, :f with the date), so readers see their own time. */
+const moments = (s) => String(s ?? "").replace(/<t:(\d+):([tf])>/g, (_, t, f) => f === "t" ? hm(+t)
+  : new Date(t * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }));
 function rate(b) {
   if (b == null) return "—";
   if (b < 1000) return `${Math.round(b)} B/s`;
@@ -628,9 +631,10 @@ function eventRow(e, existing, now, fresh, nested = false) {
     li = document.createElement("li");
     li.dataset.key = key;
     if (fresh) li.classList.add("enter");
-    const expandable = (e.log && e.log.length) || (e.detail && e.detail.length > 140);
+    const text = moments(e.detail);
+    const expandable = (e.log && e.log.length) || text.length > 140;
     const tag = expandable ? "button" : "div";
-    const detail = e.detail ? `<span class="ev-detail">${esc(expandable && !(e.log && e.log.length) ? e.detail.slice(0, 140) + "…" : e.detail)}</span>` : "";
+    const detail = text ? `<span class="ev-detail">${esc(expandable && !(e.log && e.log.length) ? text.slice(0, 140) + "…" : text)}</span>` : "";
     const body = nested && e.detail ? detail : `<span class="ev-title">${esc(e.title)}${e.service && !nested ? `<span class="chip">${esc(e.service)}</span>` : ""}</span>${detail}`;
     li.innerHTML = `
       <${tag} class="ev${e.detail ? " has-detail" : ""}" ${expandable ? `aria-expanded="false"` : ""}>
@@ -638,7 +642,7 @@ function eventRow(e, existing, now, fresh, nested = false) {
         <span class="ev-body">${body}</span>
         <span class="ev-when"><span class="t"></span>${expandable ? icon("chevron") : ""}</span>
       </${tag}>
-      ${expandable ? `<div class="ev-log"><div><pre>${(e.log && e.log.length ? e.log : e.detail.split("\n")).map((l) => `<span>${esc(l)}</span>`).join("")}</pre></div></div>` : ""}`;
+      ${expandable ? `<div class="ev-log"><div><pre>${(e.log && e.log.length ? e.log : text.split("\n")).map((l) => `<span>${esc(l)}</span>`).join("")}</pre></div></div>` : ""}`;
     if (openEvents.has(key)) li.classList.add("open");
   }
   setWhen(li, e.t, now);
