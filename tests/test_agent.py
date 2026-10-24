@@ -24,7 +24,8 @@ class Policy(unittest.TestCase):
                     "nmcli -t -f IN-USE,SSID dev wifi list", "git -C ~/services/bot log --oneline -5",
                     "vcgencmd get_throttled", "tailscale status", "ss -ltnp", "find /var/log -name '*.gz'",
                     "top -bn1 | head -20", "date +%s", "hostname -I", "ls -la ~/services", "dpkg -l | grep docker",
-                    "/usr/bin/df -h", "docker stats --no-stream", "nmcli", "ip route get 1.1.1.1"]:
+                    "/usr/bin/df -h", "docker stats --no-stream", "nmcli", "ip route get 1.1.1.1",
+                    "apt list --upgradable 2>/dev/null", "journalctl -n 50 2>&1 | grep -i error", "ls x >/dev/null"]:
             self.assertEqual(self.kind(cmd), "read", cmd)
 
     def test_changes_and_tricks_wait_for_you(self):
@@ -40,7 +41,8 @@ class Policy(unittest.TestCase):
                     "uniq in out", "date -s 2020-01-01", "hostname evil", "ip link set wlan0 down", "curl x",
                     "./script.sh", "/tmp/x", "FOO=1 ls", "tailscale down", "apt-get install x", "rm x",
                     "echo 'unclosed", "", "ss -K dst 1.2.3.4", "dmesg -C", "crontab -r", "git branch -D main",
-                    "tee /etc/x", "cat x | sh", "python3 -c 'print(1)'", "dpkg -i x.deb"]:
+                    "tee /etc/x", "cat x | sh", "python3 -c 'print(1)'", "dpkg -i x.deb", "ls 2>/tmp/x",
+                    "ls >/dev/null; reboot", "ls >& /tmp/x", "ls > /dev/null2"]:
             self.assertNotEqual(self.kind(cmd), "read", repr(cmd))
 
     def test_empty_and_huge_commands_are_refused(self):
@@ -250,16 +252,21 @@ class Chat(unittest.TestCase):
             self.assertEqual(after[:len(before)], before)
         self.assertEqual(json.dumps(agent._chats[cid]["messages"][:len(fake.sent[-1])]), json.dumps(fake.sent[-1]))
 
-    def test_typing_while_it_waits_goes_with_the_answer(self):
-        fake = self.client(reply(call("t1", "run_command", command="touch x", title="t", why="", effects=[])), reply(say("ok")))
+    def test_writing_instead_of_deciding_gets_an_answer(self):
+        fake = self.client(reply(call("t1", "run_command", command="touch x", title="t", why="", effects=[])),
+                           reply(say("It makes x.")))
         cid = agent.new_chat("make x")["id"]
         self.settle(cid, "waiting")
-        agent.send(cid, "actually, don't")
-        agent.decide(cid, "t1", run=False)
-        self.settle(cid, "idle")
+        agent.send(cid, "what does that do?")
+        chat = self.settle(cid, "idle")
         last = fake.sent[1][-1]["content"]
         self.assertEqual([b["type"] for b in last], ["tool_result", "text"])
-        self.assertEqual(last[1]["text"], "actually, don't")
+        self.assertIn("instead of deciding", last[0]["content"])
+        self.assertEqual(last[1]["text"], "what does that do?")
+        ask = self.events(chat, "ask")[0]
+        self.assertEqual((ask["state"], ask["replied"]), ("declined", True))
+        with self.assertRaises(ValueError):
+            agent.decide(cid, "t1", run=True)
 
     def test_stop_while_waiting_then_carry_on(self):
         fake = self.client(reply(call("t1", "run_command", command="touch x", title="t", why="", effects=[])), reply(say("ok")))

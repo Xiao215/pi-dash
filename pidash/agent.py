@@ -321,10 +321,27 @@ def send(cid, text: str) -> dict:
         if cid in _working or chat["round"]:
             chat["queued"].append(text[:8000])  # goes along with the next tool results
             _save(chat)
+            if cid not in _working:
+                _replied(chat)
         else:
             _add_user_text(chat, [text[:8000]])
             _start(chat)
         return summary(chat)
+
+
+def _replied(chat):
+    """Writing instead of deciding is an answer too: the waiting cards close and what you wrote goes now.
+    Not while a command of the round still runs; then it goes along with that one's result."""
+    asks = [e for e in chat["events"] if e["type"] == "ask" and e.get("call") in chat["round"]]
+    if not chat["queued"] or any(e["state"] == "running" for e in asks):
+        return
+    for ev in asks:
+        if ev["state"] == "waiting":
+            ev["state"], ev["decided"], ev["replied"] = "declined", time.time(), True
+            _touch(chat, ev)
+            _result(chat, ev["call"], "Not run: instead of deciding, the owner wrote the message below. "
+                    "Answer it, and offer the change again if it still makes sense.", resume=False)
+    _finish_round(chat)
 
 
 def _add_user_text(chat, texts):
@@ -901,6 +918,8 @@ def start():
                                          daemon=True).start()
                     else:  # dashboard jobs run inside pi-dash, so this one stopped with it
                         _ran(chat["id"], ev["call"], ev.get("lines", []) + ["pi-dash restarted while this ran."], None)
+            if chat["status"] == "waiting":
+                _replied(chat)  # a message written while a card waited, before replies answered cards
             if chat["status"] == "thinking":
                 _finish_round(chat, resume=False)
                 if chat["messages"][-1]["role"] == "user" and not chat["round"]:

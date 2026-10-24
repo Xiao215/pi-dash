@@ -32,18 +32,27 @@ def _shell_tricks(cmd: str) -> bool:
 
 
 def _split(cmd: str):
-    """[[words], ...] per piped part, or None when the command uses anything but plain pipes (;, &&, >, ...)."""
+    """[[words], ...] per piped part, or None when the command uses anything but plain pipes (;, &&, >, ...).
+    Throwing output away is fine too: >/dev/null, 2>/dev/null, 2>&1."""
     lexer = shlex.shlex(cmd, posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
-    parts, words = [], []
-    for tok in lexer:
+    tokens = list(lexer)
+    parts, words, i = [], [], 0
+    while i < len(tokens):
+        tok = tokens[i]
+        nxt = tokens[i + 1] if i + 1 < len(tokens) else None
         if tok == "|":
             parts.append(words)
             words = []
+        elif (tok in (">", ">>") and nxt == "/dev/null") or (tok == ">&" and nxt in ("1", "2")):
+            if words and words[-1] in ("1", "2"):
+                words.pop()  # the 2 of 2>/dev/null
+            i += 1
         elif tok and set(tok) <= set("();<>|&"):
             return None
         else:
             words.append(tok)
+        i += 1
     parts.append(words)
     return parts if all(parts) else None
 
