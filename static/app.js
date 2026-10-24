@@ -81,11 +81,19 @@ async function api(path, opts = {}) {
 }
 
 function toast(text, bad = false) {
-  const el = document.createElement("div");
-  el.className = "toast" + (bad ? " bad" : "");
-  el.innerHTML = icon(bad ? "x-circle" : "check") + `<span>${esc(text)}</span>`;
-  $("#toasts").append(el);
-  setTimeout(() => { el.classList.add("out"); setTimeout(() => el.remove(), 300); }, 3200);
+  const box = $("#toasts");
+  // The same message again (a button clicked twice) keeps the one showing; and never more than three at once.
+  let el = [...box.children].find((t) => t._text === text && !t.classList.contains("out"));
+  if (!el) {
+    el = document.createElement("div");
+    el.className = "toast" + (bad ? " bad" : "");
+    el.innerHTML = icon(bad ? "x-circle" : "check") + `<span>${esc(text)}</span>`;
+    el._text = text;
+    box.append(el);
+    while (box.children.length > 3) box.firstElementChild.remove();
+  }
+  clearTimeout(el._timer);
+  el._timer = setTimeout(() => { el.classList.add("out"); setTimeout(() => el.remove(), 300); }, 3200);
 }
 
 // ---- Pi: stat cards with 24 h sparklines ----------------------------------------
