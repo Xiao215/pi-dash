@@ -261,7 +261,7 @@ class Chat(unittest.TestCase):
         chat = self.settle(cid, "idle")
         last = fake.sent[1][-1]["content"]
         self.assertEqual([b["type"] for b in last], ["tool_result", "text"])
-        self.assertIn("instead of deciding", last[0]["content"])
+        self.assertIn("instead of pressing Run", last[0]["content"])
         self.assertEqual(last[1]["text"], "what does that do?")
         ask = self.events(chat, "ask")[0]
         self.assertEqual((ask["state"], ask["replied"]), ("declined", True))
