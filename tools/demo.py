@@ -332,10 +332,17 @@ def run_card(chat, ev):
     chat_event(chat, **ev)
     chat_status(chat, "running")
     lines = INSTALL if "apt" in ev["command"] else ["$ docker compose start", " Container discord-bot  Started"]
-    for line in lines:
+    stored = lambda: chat["events"][ev["n"]]  # noqa: E731 - the copy the Stop and reply handlers change
+    for i, line in enumerate(lines):
         time.sleep(0.6)
-        if ev["state"] != "running":
+        if stored()["state"] != "running":
             return
+        if "apt" in ev["command"] and i == 6:  # a question, answered from the card
+            ev["prompt"] = "Do you want to continue? [Y/n] "
+            chat_event(chat, **ev)
+            while stored().get("answer") is None and stored()["state"] == "running":
+                time.sleep(0.2)
+            ev["lines"] = ev["lines"] + [ev.pop("prompt") + (stored().get("answer") or "")]
         ev["lines"] = ev["lines"] + [line]
         chat_event(chat, **ev)
     ev.update(state="done", exit=0, finished=time.time())
@@ -497,6 +504,9 @@ class Handler(BaseHTTPRequestHandler):
                     ev.update(state="declined", decided=time.time())
                     chat_event(chat, **ev)
                     chat_status(chat, "idle")
+            elif parts[5] == "reply":
+                ev = next(e for e in chat["events"] if e.get("call") == body.get("call"))
+                ev["answer"] = body.get("text", "")
             elif parts[5] == "delete":
                 CHATS.pop(chat["id"], None)
             elif parts[5] == "stop":

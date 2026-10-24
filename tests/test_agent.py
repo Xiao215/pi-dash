@@ -25,7 +25,8 @@ class Policy(unittest.TestCase):
                     "vcgencmd get_throttled", "tailscale status", "ss -ltnp", "find /var/log -name '*.gz'",
                     "top -bn1 | head -20", "date +%s", "hostname -I", "ls -la ~/services", "dpkg -l | grep docker",
                     "/usr/bin/df -h", "docker stats --no-stream", "nmcli", "ip route get 1.1.1.1",
-                    "apt list --upgradable 2>/dev/null", "journalctl -n 50 2>&1 | grep -i error", "ls x >/dev/null"]:
+                    "apt list --upgradable 2>/dev/null", "journalctl -n 50 2>&1 | grep -i error", "ls x >/dev/null",
+                    "sed -n 90,160p /home/x/pidash/system.py", "sed -n '1,5p' f", "sed -n '$p' f", "sed -n -e 3p f"]:
             self.assertEqual(self.kind(cmd), "read", cmd)
 
     def test_changes_and_tricks_wait_for_you(self):
@@ -42,7 +43,9 @@ class Policy(unittest.TestCase):
                     "./script.sh", "/tmp/x", "FOO=1 ls", "tailscale down", "apt-get install x", "rm x",
                     "echo 'unclosed", "", "ss -K dst 1.2.3.4", "dmesg -C", "crontab -r", "git branch -D main",
                     "tee /etc/x", "cat x | sh", "python3 -c 'print(1)'", "dpkg -i x.deb", "ls 2>/tmp/x",
-                    "ls >/dev/null; reboot", "ls >& /tmp/x", "ls > /dev/null2"]:
+                    "ls >/dev/null; reboot", "ls >& /tmp/x", "ls > /dev/null2",
+                    "sed -n 1w/tmp/x f", "sed -n 1e f", "sed 1,5p f", "sed -n -f script f", "sed -ni 1p f",
+                    "sed -n 1,5p ~/.env"]:
             self.assertNotEqual(self.kind(cmd), "read", repr(cmd))
 
     def test_empty_and_huge_commands_are_refused(self):
@@ -362,6 +365,64 @@ class Chat(unittest.TestCase):
         self.assertTrue(everything["events"])
         self.assertEqual(later["events"], [])
         self.assertIsNone(agent.since("nope", 0))
+
+
+class Terminal(unittest.TestCase):
+    """Approved commands run under script(1): their log is read as it grows, and replies go in through a FIFO."""
+
+    def setUp(self):
+        agent.RUNS.mkdir(parents=True, exist_ok=True)
+        self.cid, self.call, self.unit = "a1b2c3d4e5f6", "toolu_x", "pi-dash-agent-test"
+        with agent._lock:
+            agent._chats[self.cid] = {"id": self.cid, "title": "t", "created": 0, "updated": 0, "status": "running", "seq": 0,
+                                      "messages": [{"role": "user", "content": []}], "events": [], "pending": {},
+                                      "round": [self.call], "results": {}, "queued": [], "cost": 0.0, "rounds": 0}
+            agent._event(agent._chats[self.cid], type="ask", call=self.call, tool="run_command", command="apt-get upgrade",
+                         title="t", why="", effects=[], labels=[], state="running", lines=[], unit=self.unit, started=0)
+        p = unittest.mock.patch.object(agent, "_systemctl", lambda *a, **k: (0, "active"))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_output_prompt_and_exit_code(self):
+        log, _, exit_file = agent._files(self.unit)
+        log.write_bytes(b"Script started on 2026-10-24 [COMMAND=...]\nReading lists... 0%\rReading lists... Done\r\n"
+                        b"\x1b[1mDo you want to continue? [Y/n] \x1b[0m")
+        seen = {}
+        done = threading.Event()
+
+        def finish():
+            time.sleep(0.8)
+            with agent._lock:
+                seen["prompt"] = agent._find(agent._chats[self.cid], self.call).get("prompt")
+            with log.open("ab") as f:
+                f.write(b"y\r\nSetting up tzdata\r\n\r\nScript done on 2026-10-24 [COMMAND_EXIT_CODE=\"0\"]\n")
+            exit_file.write_text("0")
+            done.set()
+        threading.Thread(target=finish).start()
+        with unittest.mock.patch.object(agent, "_finish_round"):
+            agent._follow(self.cid, self.call, self.unit)
+        done.wait(5)
+        ev = agent._find(agent._chats[self.cid], self.call)
+        self.assertEqual(seen["prompt"], "Do you want to continue? [Y/n] ")
+        self.assertEqual(ev["lines"], ["Reading lists... Done", "Do you want to continue? [Y/n] y", "Setting up tzdata"])
+        self.assertEqual((ev["state"], ev["exit"]), ("done", 0))
+        self.assertNotIn("prompt", ev)
+        self.assertFalse(log.exists() or exit_file.exists())
+
+    def test_reply_goes_into_the_fifo(self):
+        _, fifo, _ = agent._files(self.unit)
+        fifo.unlink(missing_ok=True)
+        agent.os.mkfifo(fifo)
+        fd = agent.os.open(fifo, agent.os.O_RDONLY | agent.os.O_NONBLOCK)  # the command's end
+        try:
+            agent.reply(self.cid, self.call, "y")
+            agent.reply(self.cid, self.call, "")
+            self.assertEqual(agent.os.read(fd, 100), b"y\n\n")
+        finally:
+            agent.os.close(fd)
+            fifo.unlink()
+        with self.assertRaises(ValueError):  # nobody reading: not taking input
+            agent.reply(self.cid, self.call, "y")
 
 
 class AssistantHttp(unittest.TestCase):

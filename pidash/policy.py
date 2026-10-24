@@ -134,6 +134,29 @@ def _find(a):
                    for w in a)
 
 
+SED_PRINT = re.compile(r"(\d+|\$)(,(\d+|\$))?p")
+
+
+def _sed(a):
+    """Only printing line ranges (sed -n 90,160p file): sed can also write files (w) and run commands (e)."""
+    scripts, files, i = [], [], 0
+    while i < len(a):
+        w = a[i]
+        if w in ("-n", "--quiet", "--silent", "-E", "-r", "--regexp-extended"):
+            pass
+        elif w in ("-e", "--expression"):
+            i += 1
+            scripts.append(a[i] if i < len(a) else "")
+        elif w.startswith("-"):
+            return False  # -i, -f, -s and the rest
+        elif not scripts:
+            scripts.append(w)
+        else:
+            files.append(w)
+        i += 1
+    return bool(scripts) and all(SED_PRINT.fullmatch(s) for s in scripts) and ("-n" in a or "--quiet" in a or "--silent" in a)
+
+
 def _journalctl(a):
     return not _short(a, "f") and not _long(a, "--follow", "--rotate", "--flush", "--sync", "--relinquish-var",
                                             "--smart-relinquish-var", "--setup-keys", "--update-catalog") \
@@ -252,7 +275,7 @@ PROGRAMS = {
     "top": _top, "find": _find, "journalctl": _journalctl, "systemctl": _systemctl, "docker": _docker,
     "apt": _apt, "apt-cache": _apt_cache, "dpkg": _dpkg, "dpkg-query": _dpkg, "vcgencmd": _vcgencmd,
     "tailscale": _tailscale, "nmcli": _nmcli, "git": _git, "timedatectl": _timedatectl, "hostnamectl": _hostnamectl,
-    "crontab": _crontab,
+    "crontab": _crontab, "sed": _sed,
     "ip": lambda a: _sub(a)[1][:1] in ([], ["show"], ["list"], ["ls"], ["get"]),
 }
 

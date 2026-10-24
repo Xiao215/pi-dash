@@ -1545,6 +1545,7 @@ let chatDown = 0;            // when the stream dropped (0: connected)
 let reconnected = "";        // shown on a running card after the connection came back
 let askContext = null;       // the Activity entry a new chat is about
 let editing = null, editText = "";  // the card whose command is being edited, and the edit so far
+let replyDraft = { call: null, text: "" };  // what's typed in a running command's reply box
 const openSteps = new Set(), openOutput = new Set();  // "Looked at" boxes and outputs left open
 const RISKY = /connection|Restarts|off|secrets/;
 
@@ -1639,7 +1640,13 @@ function connectChat(gen) {
     src.close();
     if (!chatDown) chatDown = Date.now();
     agentSub("Reconnecting…", "bad");
-    setTimeout(() => { if (gen === chatGen && agentOpen()) connectChat(gen); }, 2000);
+    setTimeout(async () => {
+      if (gen !== chatGen || !agentOpen()) return;
+      // Gone (removed elsewhere) rather than unreachable: back to the list instead of retrying forever.
+      const r = await fetch(`/api/agent/chats/${encodeURIComponent(chat.id)}?since=${chat.seq}`).catch(() => null);
+      if (gen !== chatGen) return;
+      if (r?.status === 404) { await loadAgent(); showHome(); } else connectChat(gen);
+    }, 2000);
   };
 }
 
@@ -1722,8 +1729,11 @@ function askHtml(e) {
     return card(" settled", `${head("")}${cmd}<div class="result off">${icon("x-circle")}Not run</div>`);
   }
   if (e.state === "running") {
+    const prompt = e.prompt ? `${lines ? "\n" : ""}${esc(e.prompt)}` : "";
+    const secret = /pass(word|phrase)|secret|token|pin\b/i.test(e.prompt || "");
     return card(risky ? " risky" : "", `${head(`<span class="wait"><span class="live-dot busy"></span>Running · ${mmss(Date.now() / 1000 - (e.started || Date.now() / 1000))}</span>`)}
-      ${cmd}${edited}<pre class="run-log">${lines}</pre>
+      ${cmd}${edited}<pre class="run-log">${lines}${prompt}</pre>
+      ${e.tool === "run_command" ? `<form class="run-reply" data-reply="${esc(e.call)}"><input type="${secret ? "password" : "text"}" placeholder="${e.prompt ? "Answer it here, then Enter" : "Type to the command, then Enter"}" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Reply to the command"><button class="btn icon quiet" type="submit" title="Send">${icon("send")}</button></form>` : ""}
       ${reconnected ? `<p class="edited">${icon("check")} ${esc(reconnected)}</p>` : ""}
       <div class="ask-foot"><span class="grow">You approved this at ${esc(hm(e.decided))}.</span><button class="btn" type="button" data-ask="stop">${icon("stop")}Stop</button></div>`);
   }
@@ -1768,6 +1778,7 @@ function chatBlocks() {
 /** Keyed blocks, so only what changed is redrawn: open boxes stay open and an edit in progress survives. */
 function renderChat() {
   if (!chat) return;
+  const typing = document.activeElement?.closest?.(".run-reply")?.dataset.reply;
   const atBottom = chatEl._stick || chatEl.scrollHeight - chatEl.scrollTop - chatEl.clientHeight < 80;
   const blocks = chatEl._blocks;
   const keep = new Set();
@@ -1786,6 +1797,10 @@ function renderChat() {
     place(el);
   }
   for (const [k, el] of blocks) if (!keep.has(k)) { el.remove(); blocks.delete(k); }
+  // A redrawn card gets a new reply box: put back what was typed, and the cursor.
+  const box = replyDraft.call && chatEl.querySelector(`[data-reply="${CSS.escape(replyDraft.call)}"] input`);
+  if (box && box.value !== replyDraft.text) box.value = replyDraft.text;
+  if (box && typing === replyDraft.call && document.activeElement !== box) box.focus({ preventScroll: true });
   chatEl.querySelectorAll(".ask-card:not(.settled) .run-log").forEach((pre) => { pre.scrollTop = pre.scrollHeight; });
   if (atBottom) chatEl.scrollTop = chatEl.scrollHeight;
   chatEl._stick = false;
@@ -1905,7 +1920,27 @@ chatEl.addEventListener("click", async (e) => {
     ta.setSelectionRange(ta.value.length, ta.value.length);
   } else if (act === "cancel-edit") { editing = null; renderChat(); }
 });
-chatEl.addEventListener("input", (e) => { if (e.target.id === "edit-cmd") editText = e.target.value; });
+chatEl.addEventListener("input", (e) => {
+  if (e.target.id === "edit-cmd") editText = e.target.value;
+  const r = e.target.closest(".run-reply");
+  if (r) replyDraft = { call: r.dataset.reply, text: e.target.value };
+});
+chatEl.addEventListener("focusin", (e) => {
+  const r = e.target.closest(".run-reply");
+  if (r && replyDraft.call !== r.dataset.reply) replyDraft = { call: r.dataset.reply, text: e.target.value };
+});
+chatEl.addEventListener("submit", async (e) => {
+  const form = e.target.closest(".run-reply");
+  if (!form || !chat) return;
+  e.preventDefault();
+  const input = form.querySelector("input");
+  const text = input.value;
+  input.value = "";
+  replyDraft = { call: form.dataset.reply, text: "" };
+  try {
+    await api(`/api/agent/chats/${chat.id}/reply`, { method: "POST", body: JSON.stringify({ call: form.dataset.reply, text }) });
+  } catch (err) { toast(err.message, true); }
+});
 chatEl.addEventListener("toggle", (e) => {
   const d = e.target;
   for (const [attr, set] of [["steps", openSteps], ["output", openOutput]]) {

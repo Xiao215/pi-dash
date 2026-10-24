@@ -402,6 +402,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(agent.decide(cid, str(body.get("call", "")), body.get("run") is True, command))
                 if action == "stop":
                     return self._json(agent.stop(cid))
+                if action == "reply":
+                    return self._json(agent.reply(cid, str(body.get("call", "")), text))
                 if action == "delete":
                     agent.delete(cid)
                     return self._json({"ok": True})

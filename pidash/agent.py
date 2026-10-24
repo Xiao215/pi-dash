@@ -4,11 +4,13 @@ Each chat is a file in STATE_DIR/agent. The conversation sent to the API is only
 exactly as the model wrote it. While a chat has something to do, a worker thread asks the model, runs the read-only
 tools it calls (policy.py decides which those are) and stops at the first change, which waits as a card until you
 decide. Approved commands run as transient systemd --user units, outside pi-dash's own cgroup, so restarting
-pi-dash (or an upgrade doing it) can't cut them off halfway; their output is read back from the journal."""
+pi-dash (or an upgrade doing it) can't cut them off halfway. Each runs in a terminal (script(1)), so output comes as it's
+written and prompts show; its log is read back from a file, and what you type on the card goes in through a FIFO."""
 
 import getpass
 import json
 import logging
+import os
 import re
 import secrets
 import shlex
@@ -91,7 +93,8 @@ TOOLS = [
           f"and the like) run at once, with a {READ_TIMEOUT} s limit and long output trimmed to its start and end. "
           "Anything else (changes, sudo, ; && or redirects, $(...), programs not known to be read-only, files that "
           "may hold secrets) is shown to the owner with `why` and `effects` and runs only if they approve it, with no "
-          "time limit. Nothing interactive: no editors, pagers or password prompts.",
+          "time limit, in a terminal: if it asks something, the owner can type the answer on the card. Still prefer "
+          "flags that don't ask (-y, --noconfirm), and nothing full-screen (editors, pagers, top without -b).",
           {"command": {"type": "string"}, "title": TITLE, "why": WHY, "effects": EFFECTS},
           ["command", "title", "why", "effects"]),
     _tool("service_action", "Start, stop, restart or update a service the dashboard manages, exactly like its "
@@ -781,6 +784,11 @@ def _systemctl(*args, timeout=10):
     return services.run(["systemctl", "--user", *args], timeout=timeout)
 
 
+def _files(unit):
+    """A run's output log, the FIFO that takes what you type, and where its exit code lands."""
+    return RUNS / f"{unit}.log", RUNS / f"{unit}.in", RUNS / f"{unit}.exit"
+
+
 def _run_command(cid, call):
     with _lock:
         ev = _find(_chats[cid], call)
@@ -788,40 +796,59 @@ def _run_command(cid, call):
         unit = ev["unit"] = _unit(cid, call)
         _touch(_chats[cid], ev)
     RUNS.mkdir(parents=True, exist_ok=True)
-    exit_file = RUNS / f"{unit}.exit"
-    exit_file.unlink(missing_ok=True)
-    script = f"/bin/bash -c {shlex.quote(cmd)} </dev/null 2>&1; printf %s \"$?\" > {shlex.quote(str(exit_file))}"
+    out_file, in_file, exit_file = _files(unit)
+    for f in (out_file, in_file, exit_file):
+        f.unlink(missing_ok=True)
+    os.mkfifo(in_file, 0o600)
+    # script gives the command a terminal (line by line output, prompts) and writes everything to the log as it comes.
+    # Opening the FIFO read-write keeps it from waiting for a writer, and from hitting end-of-file between replies.
+    inner = f"stty cols 120 rows 40 2>/dev/null; {cmd}"
+    q = shlex.quote
+    script = (f"exec 3<>{q(str(in_file))}; script -qfec {q(inner)} {q(str(out_file))} <&3 >/dev/null 2>&1; "
+              f"printf %s \"$?\" > {q(str(exit_file))}")
     code, out = services.run(["systemd-run", "--user", "--quiet", "--collect", f"--unit={unit}",
                               f"--working-directory={HOME}", f"--setenv=PATH={services.ENV['PATH']}",
-                              "--setenv=PAGER=cat", "--setenv=SYSTEMD_PAGER=", "--setenv=DEBIAN_FRONTEND=noninteractive",
+                              "--setenv=SHELL=/bin/bash", "--setenv=TERM=dumb", "--setenv=PAGER=cat",
+                              "--setenv=SYSTEMD_PAGER=", "--setenv=DEBIAN_FRONTEND=noninteractive",
                               "/bin/bash", "-c", script], timeout=20)
     if code != 0:
         return _ran(cid, call, [f"Couldn't start it: {out.strip()}"], None)
-    _follow(cid, call, unit, exit_file)
+    _follow(cid, call, unit)
 
 
-def _follow(cid, call, unit, exit_file, cursor=""):
-    """Read the unit's output from the journal until it has finished."""
-    lines, quiet = [], 0
+ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07]*\x07|\x1b[()][0-9A-Za-z]|\x1b[=>]")
+
+
+def _clean(line: str) -> str:
+    """One terminal line as text: colours gone, and only what's left after carriage returns (progress bars)."""
+    return ANSI.sub("", line).rstrip("\r").split("\r")[-1]
+
+
+def _follow(cid, call, unit, offset=0):
+    """Read the run's log as it grows until it has finished. The unfinished last line is a prompt, maybe."""
+    out_file, in_file, exit_file = _files(unit)
+    lines, partial, quiet = [], b"", 0
     while True:
         done = exit_file.exists()
-        # Only what the command printed: sudo inside it logs to the same unit too.
-        args = ["journalctl", f"--user-unit={unit}", "_TRANSPORT=stdout", "-o", "cat", "--no-pager", "--show-cursor"]
-        _, out = services.run(args + ([f"--after-cursor={cursor}"] if cursor else []), timeout=20)
-        new = []
-        for line in out.splitlines():
-            if line.startswith("-- cursor: "):
-                cursor = line[11:].strip()
-            elif line != "-- No entries --":
-                new.append(line)
-        if new:
+        try:
+            with out_file.open("rb") as f:
+                f.seek(offset)
+                chunk = f.read()
+        except FileNotFoundError:
+            chunk = b""
+        if chunk:
+            offset += len(chunk)
+            *complete, partial = (partial + chunk).split(b"\n")
+            new = [_clean(l.decode("utf-8", "replace")) for l in complete]
+            new = [l for l in new if not l.startswith(("Script started on ", "Script done on "))]
             lines += new
             del lines[:-5000]
             with _lock:
                 chat = _chats[cid]
                 ev = _find(chat, call)
                 ev["lines"] = (ev["lines"] + [policy.redact(l) for l in new])[-SHOWN_LINES:]
-                ev["cursor"] = cursor
+                ev["prompt"] = policy.redact(_clean(partial.decode("utf-8", "replace")))[-300:]
+                ev["offset"] = offset - len(partial)
                 _touch(chat, ev, save=False)
         if done:
             break
@@ -829,13 +856,37 @@ def _follow(cid, call, unit, exit_file, cursor=""):
         quiet = quiet + 1 if state.strip() not in ("active", "activating", "deactivating") else 0
         if quiet >= 3:  # gone without writing its exit code: it was stopped or killed
             break
-        time.sleep(1)
+        time.sleep(0.5)
+    while lines and not lines[-1].strip():
+        lines.pop()
     try:
         exit_code = int(exit_file.read_text().strip())
     except (FileNotFoundError, ValueError):
         exit_code = None
-    exit_file.unlink(missing_ok=True)
+    for f in (out_file, in_file, exit_file):
+        f.unlink(missing_ok=True)
+    with _lock:
+        _find(_chats[cid], call).pop("prompt", None)
     _ran(cid, call, lines, exit_code)
+
+
+def reply(cid, call: str, text: str) -> dict:
+    """Type a line into a running command (an answer to its prompt; empty is just Enter). Not kept anywhere."""
+    with _lock:
+        chat = _need(cid)
+        ev = _find(chat, call)
+        if not ev or ev["type"] != "ask" or ev["state"] != "running" or not ev.get("unit"):
+            raise ValueError("That command isn't running anymore.")
+        in_file = _files(ev["unit"])[1]
+    try:
+        fd = os.open(in_file, os.O_WRONLY | os.O_NONBLOCK)
+    except OSError:
+        raise ValueError("That command isn't taking input.") from None
+    try:
+        os.write(fd, (text[:2000] + "\n").encode())
+    finally:
+        os.close(fd)
+    return summary(chat)
 
 
 def _stop_unit(unit):
@@ -915,8 +966,7 @@ def start():
                     _result(chat, ev["call"], "Interrupted: pi-dash restarted before this finished.", True, False)
                 elif ev["type"] == "ask" and ev["state"] == "running":
                     if ev["tool"] == "run_command" and ev.get("unit"):
-                        threading.Thread(target=_follow, args=(chat["id"], ev["call"], ev["unit"],
-                                                               RUNS / f"{ev['unit']}.exit", ev.get("cursor", "")),
+                        threading.Thread(target=_follow, args=(chat["id"], ev["call"], ev["unit"], ev.get("offset", 0)),
                                          daemon=True).start()
                     else:  # dashboard jobs run inside pi-dash, so this one stopped with it
                         _ran(chat["id"], ev["call"], ev.get("lines", []) + ["pi-dash restarted while this ran."], None)

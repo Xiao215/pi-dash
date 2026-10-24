@@ -68,7 +68,7 @@ Turn it on by running `./install.sh` again and answering yes. It runs on an [Ant
 
 Open it with **Ask** in the header, by pressing `/`, or with **Ask why this happened** under a problem in Activity. It sees what the dashboard sees. To find out more it reads logs and runs commands that only look, and the "Looked at" box shows each one with its output. When something needs changing it shows a card with the command, what it expects to happen (what restarts, whether your connection may drop, whether a reboot is needed after), and **Run**, **Edit** and **Not now** buttons.
 
-Approved commands run as `systemd --user` units, so they keep going when the page closes, Tailscale restarts or pi-dash itself restarts. Their output streams onto the card, and **Stop** ends them. Commands that start with `sudo` need passwordless sudo for your user, which Raspberry Pi OS has by default.
+Approved commands run as `systemd --user` units, so they keep going when the page closes, Tailscale restarts or pi-dash itself restarts. They run in a terminal, so their output streams onto the card as it's written; if one asks a question, type the answer in the box under its output (password prompts stay hidden). **Stop** ends them. Commands that start with `sudo` need passwordless sudo for your user, which Raspberry Pi OS has by default.
 
 Settings: `model` (default `claude-opus-5-5`), `effort` (`low`, `medium` or `high`) and `daily_budget_usd` (default 3). With an API key the panel shows what each chat cost (a typical question costs a few cents), and new answers wait once the day's budget is spent. Through cli-bridge it shows tokens instead, and your plan's own limits apply.
 
