@@ -1719,7 +1719,7 @@ function askHtml(e) {
       <div class="ask-foot"><span class="grow">Runs as ${esc(agentInfo?.user || "you")}. Recorded in Activity.</span>${buttons}</div>`);
   }
   if (e.state === "declined") {
-    return card(" settled", `${head("")}${cmd}<div class="result off">${icon("x-circle")}Not run${e.replied ? " · you replied instead" : ""}</div>`);
+    return card(" settled", `${head("")}${cmd}<div class="result off">${icon("x-circle")}Not run</div>`);
   }
   if (e.state === "running") {
     return card(risky ? " risky" : "", `${head(`<span class="wait"><span class="live-dot busy"></span>Running · ${mmss(Date.now() / 1000 - (e.started || Date.now() / 1000))}</span>`)}
