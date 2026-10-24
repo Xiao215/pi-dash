@@ -241,6 +241,12 @@ def summary(chat) -> dict:
             "cost": round(chat["cost"], 4), "tokens": chat.get("tokens", 0)}
 
 
+def waiting() -> int:
+    """Chats with a change waiting for you, for the dot on the Ask button."""
+    with _lock:
+        return sum(1 for c in _all() if c["status"] == "waiting")
+
+
 def overview() -> dict:
     with _lock:
         chats = sorted((summary(c) for c in _all()), key=lambda c: -c["t"])[:30]

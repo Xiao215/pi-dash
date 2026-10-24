@@ -89,7 +89,7 @@ def state():
             "jobs": [scheduled.status(j) for j in scheduled.jobs_list()],
             "events": store.events(80), "history": _history(now), "heartbeat": heartbeat, "version": static_version(),
             "muted_until": store.load_state().get("muted_until", 0), "auth": bool(config.PASSWORD_HASH),
-            "wifi_switch": wifi.switch}
+            "wifi_switch": wifi.switch, "assistant_waiting": agent.waiting() if config.ASSISTANT else 0}
 
 
 def _buckets(rows, since, n, step, get):

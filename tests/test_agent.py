@@ -334,6 +334,15 @@ class Chat(unittest.TestCase):
         self.settle(cid, "idle")
         self.assertEqual(len(fake.sent), 2)
 
+    def test_waiting_chats_are_counted(self):
+        self.client(reply(call("t1", "run_command", command="touch x", title="t", why="", effects=[])))
+        before = agent.waiting()
+        cid = agent.new_chat("make x")["id"]
+        self.settle(cid, "waiting")
+        self.assertEqual(agent.waiting(), before + 1)
+        agent.delete(cid)
+        self.assertEqual(agent.waiting(), before)
+
     def test_remove_a_chat(self):
         self.client(reply(say("hello")))
         cid = agent.new_chat("hi")["id"]

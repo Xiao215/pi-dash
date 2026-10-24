@@ -161,6 +161,7 @@ def state(trouble):
         cpu[-1], temp[-1] = 88, 78
     return {
         "now": now, "hostname": "homelab", "muted_until": 0, "events": events, "services": services,
+        "assistant_waiting": sum(1 for c in CHATS.values() if c["status"] == "waiting"),
         "jobs": jobs(now, trouble), "heartbeat": {"ok": True, "t": now - 70, "error": "", "every": 120},
         "history": {"cpu": cpu, "temp": temp, "mem": mem, "rx": rx, "tx": tx, "offline": offline,
                     "peak": {"cpu": max(cpu) + 12, "temp": max(temp) + 1, "mem": max(mem), "rx": max(rx) * 1.3, "tx": max(tx) * 1.2}},

@@ -844,6 +844,9 @@ function render(data) {
   renderJobs(data);
   renderFeed(data.events, data.now);
   renderOverall(data);
+  const ask = $("#ask-btn");
+  ask.classList.toggle("attn", data.assistant_waiting > 0);
+  ask.title = data.assistant_waiting ? "A chat is waiting for you" : "Ask the assistant (/)";
   if (page) renderPage(data);
   if (firstRender) document.body.classList.remove("loading");
 }
@@ -1600,7 +1603,8 @@ function showHome(context = null) {
   if (info.problem) html += `<div class="note warn">${icon("alert")}<span>${esc(info.problem)}</span></div>`;
   if (info.chats?.length) {
     html += `<div><p class="recent-label">Recent</p><div class="recent">${info.chats.slice(0, 12).map((c) =>
-      `<div class="recent-row"><button type="button" data-chat="${esc(c.id)}"><span>${esc(c.title)}</span><span class="t">${esc(ago(c.t))}</span></button><button type="button" class="recent-del" data-del="${esc(c.id)}" title="Remove" aria-label="Remove this chat">${icon("x")}</button></div>`).join("")}</div></div>`;
+      `<div class="recent-row"><button type="button" data-chat="${esc(c.id)}"><span>${esc(c.title)}</span>${c.status === "waiting" ? `<span class="t wait"><span class="live-dot busy"></span>Waiting for you</span>`
+        : ["thinking", "running"].includes(c.status) ? `<span class="t">Working…</span>` : `<span class="t">${esc(ago(c.t))}</span>`}</button><button type="button" class="recent-del" data-del="${esc(c.id)}" title="Remove" aria-label="Remove this chat">${icon("x")}</button></div>`).join("")}</div></div>`;
   }
   chatEl._blocks = null;
   clear(chatEl);
