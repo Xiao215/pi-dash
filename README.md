@@ -87,6 +87,7 @@ List them in `~/services/services.json`; [examples/services.example.json](exampl
 | `update` | shell steps for the Update button and auto-update |
 | `repo` | the git checkout inside `dir`, if not `dir` itself |
 | `url` | optional link on the card |
+| `private_logs` | `true` for a service whose log may hold personal data: alerts (and Discord) say that it has errors but carry none of its lines, and the assistant asks before reading it. The Logs button still shows it |
 
 Then reload the list: `curl -X POST -H 'X-Pi-Dash: 1' http://localhost:9000/api/reload`.
 

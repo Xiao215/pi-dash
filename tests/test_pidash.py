@@ -192,6 +192,23 @@ class Logs(unittest.TestCase):
         self.assertEqual(row["msg"], "héllo")
         self.assertEqual(row["t"], 1700000000)
 
+    def test_private_logs_stay_out_of_alerts(self):
+        svc = config.Service(name="finstore", kind="systemd", unit="finstore.service", private_logs=True)
+        with unittest.mock.patch.object(services, "run", side_effect=AssertionError("read the journal")):
+            self.assertEqual(services.recent_logs(svc, 20), [])
+        pending, lock = {}, __import__("threading").Lock()
+        entry = {"MESSAGE": "[FinStore] sync Some Bank: TypeError: account 1234 failed", "_SYSTEMD_UNIT": "finstore.service"}
+        watch._last_error_alert.pop("finstore", None)
+        with unittest.mock.patch.object(watch, "_match_service", return_value=svc), \
+                unittest.mock.patch.object(watch, "alert") as alert:
+            watch._journal_entry(entry, pending, lock)
+            watch._journal_entry(entry, pending, lock)  # within the cooldown: no second alert
+        self.assertEqual(pending, {})
+        alert.assert_called_once()
+        self.assertEqual(alert.call_args.args[1], "Errors in finstore's log")
+        self.assertNotIn("1234", str(alert.call_args))
+        self.assertNotIn("log_lines", alert.call_args.kwargs)
+
     def test_docker_times(self):
         self.assertEqual(services._parse_docker_time("2023-11-14T22:13:20.123456789Z"), 1700000000)
         self.assertIsNone(services._parse_docker_time("0001-01-01T00:00:00Z"))

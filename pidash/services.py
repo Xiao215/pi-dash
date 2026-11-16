@@ -276,6 +276,8 @@ def format_entry(entry) -> dict:
 
 
 def recent_logs(svc, lines=20) -> list[str]:
+    if getattr(svc, "private_logs", False):
+        return []  # never copied into alerts (Discord) or handed to the assistant; the Logs button still shows it
     _, out = run(log_command(svc, lines), timeout=10)
     rows = []
     for line in out.splitlines():

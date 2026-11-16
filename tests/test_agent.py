@@ -9,7 +9,7 @@ import unittest.mock
 from types import SimpleNamespace
 
 import _env  # noqa: F401 - a throwaway config and state folder, before anything imports pidash
-from pidash import agent, policy, store, web
+from pidash import agent, config, policy, store, watch, web
 
 
 class Policy(unittest.TestCase):
@@ -216,6 +216,24 @@ class Chat(unittest.TestCase):
         self.assertEqual(self.ran, [])
         with self.assertRaises(ValueError):
             agent.decide(cid, "t1", run=True)
+
+    def test_a_private_log_is_not_read_without_asking(self):
+        private = config.Service(name="finstore", kind="systemd", unit="finstore.service", private_logs=True)
+        p = unittest.mock.patch.object(watch, "services_list", lambda: [private])
+        p.start()
+        self.addCleanup(p.stop)
+        self.assertEqual(agent._private_guard("journalctl -u finstore -n 50", policy.classify("journalctl -u finstore -n 50"))["kind"],
+                         "change")
+        self.assertEqual(agent._private_guard("journalctl -u xiap -n 50", policy.classify("journalctl -u xiap -n 50"))["kind"],
+                         "read")
+        self.assertEqual(agent._private_guard("ls finstores", policy.classify("ls finstores"))["kind"], "read")
+        self.assertIn("is private", agent._service_log(private, 20)[0])
+        fake = self.client(reply(call("t1", "run_command", command="journalctl -u finstore.service -n 50", title="t", why="",
+                                      effects=[])), reply(say("OK.")))
+        chat = self.settle(agent.new_chat("why is finstore failing?")["id"], "waiting")
+        ask = self.events(chat, "ask")[0]
+        self.assertIn("Shows a private log", ask["labels"])
+        self.assertEqual(self.ran, [])
 
     def test_run_records_it_and_tells_the_model(self):
         fake = self.client(reply(call("t1", "run_command", command="docker restart bot", title="t", why="", effects=[])),

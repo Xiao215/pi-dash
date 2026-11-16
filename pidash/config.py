@@ -81,6 +81,7 @@ class Service:
     url: str = ""                   # optional link shown on the card
     repo: str = ""                  # git checkout, relative to dir (default: dir itself)
     check: dict = field(default_factory=dict)  # {"command": ..., "problem": ..., "every": 300}: must exit 0
+    private_logs: bool = False      # its log stays on the Pi: no lines in alerts, the assistant asks first
 
     @property
     def path(self) -> Path:

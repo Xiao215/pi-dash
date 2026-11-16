@@ -209,6 +209,13 @@ def _journal_entry(entry, pending, lock):
         return
 
     name = svc.name
+    if svc.private_logs:  # say that it has errors, not what they say
+        now = time.time()
+        if services.ERROR_RE.search(msg) and now - _last_error_alert.get(name, 0) >= config.ERROR_COOLDOWN:
+            _last_error_alert[name] = now
+            alert("warn", f"Errors in {name}'s log", "Its log is private, so the lines stay on the Pi: open Logs on "
+                  f"the dashboard, or run journalctl -u {svc.unit or name}.", name)
+        return
     with lock:
         if name in pending:
             pending[name]["lines"].append(msg.rstrip())

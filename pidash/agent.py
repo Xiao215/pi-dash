@@ -651,7 +651,7 @@ def _sort_calls(chat, uses) -> list:
                 n = max(1, min(500, inp["lines"]))
                 reads.append((call, f"Read {svc.name}'s log ({n} lines)", _service_log, (svc, n)))
         elif name == "run_command":
-            c = policy.classify(inp["command"])
+            c = _private_guard(inp["command"], policy.classify(inp["command"]))
             if c["kind"] == "blocked":
                 _result(chat, call, f"Not run: {c['reason']}.", error=True, resume=False)
             elif c["kind"] == "read":
@@ -707,6 +707,19 @@ def _trim(text: str) -> str:
     return f"{text[:half]}\n… [{len(text) - OUTPUT_LIMIT} characters cut] …\n{text[-half:]}"
 
 
+def _private_guard(cmd, c):
+    """A read that names a service whose log is private (say journalctl -u finstore) waits for the owner, like a
+    change. Unfiltered reads of the whole journal still run at once and can include its lines."""
+    if c["kind"] != "read":
+        return c
+    for s in watch.services_list():
+        names = {s.name, s.unit.removesuffix(".service")} - {""}
+        if s.private_logs and any(re.search(rf"(?<![\w-]){re.escape(n)}(?![\w-])", cmd) for n in names):
+            return {"kind": "change", "labels": [*c["labels"], "Shows a private log"],
+                    "reason": f"it may show {s.name}'s log, which is private"}
+    return c
+
+
 def _read_command(cmd):
     env = {**services.ENV, "PAGER": "cat", "GIT_PAGER": "cat", "SYSTEMD_PAGER": "", "SYSTEMD_COLORS": "0",
            "LC_ALL": "C.UTF-8"}
@@ -721,6 +734,8 @@ def _read_command(cmd):
 
 
 def _service_log(svc, n):
+    if svc.private_logs:
+        return f"{svc.name}'s log is private: pi-dash doesn't read it for you. The owner can open Logs on the dashboard.", True
     return "\n".join(services.recent_logs(svc, n)) or "(the log is empty)", True
 
 
