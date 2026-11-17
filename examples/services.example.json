@@ -47,6 +47,12 @@
       "description": "A cron job that reports in: ... ; curl -fsS -d \"$out\" localhost:9000/api/ping/photo-sync/$?",
       "every": "6h",
       "grace": "30m"
+    },
+    {
+      "name": "mirror",
+      "description": "A systemd service with no timer: it runs only when you press Run now",
+      "service": "mirror.service",
+      "user": true
     }
   ]
 }

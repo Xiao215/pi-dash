@@ -259,7 +259,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json({"error": "no such job"}, 404)
                 if parts[3] == "output":  # what the last ping sent along
                     return self._json({"lines": store.load_state().get("job_logs", {}).get(job.name, [])})
-                return self._logs(scheduled.as_service(job)) if job.timer else self._json({"error": "not a timer"}, 400)
+                return self._logs(scheduled.as_service(job)) if job.service else self._json({"error": "not a systemd job"}, 400)
         except BrokenPipeError:
             return
         self._json({"error": "not found"}, 404)
@@ -310,8 +310,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": True})
         if parts[:2] == ["api", "scheduled"] and len(parts) == 4 and parts[3] == "run":
             job = scheduled.get(parts[2])
-            if not job or not job.timer:
-                return self._json({"error": "no such timer"}, 404)
+            if not job or not job.service:
+                return self._json({"error": "no such systemd job"}, 404)
             scheduled.run_now(job)
             notify.alert("info", f"Started {job.name} from the dashboard", service=job.name, discord=False)
             return self._json({"ok": True})

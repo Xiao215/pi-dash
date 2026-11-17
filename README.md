@@ -93,7 +93,7 @@ Then reload the list: `curl -X POST -H 'X-Pi-Dash: 1' http://localhost:9000/api/
 
 ## Scheduled jobs
 
-Add backups, syncs and other periodic work under `"jobs"` in the same file (see the example). Each job is one of two kinds:
+Add backups, syncs and other periodic work under `"jobs"` in the same file (see the example). Each job is one of three kinds:
 
 - **A systemd timer**: `"timer": "backup.timer"` (and `"user": true` for a `systemctl --user` timer). pi-dash reads every run from systemd: when it started, how long it took, its exit code. The card gets Logs and Run now buttons.
 - **Anything else** (cron, a script on another machine): it reports each run to `/api/ping/<name>`, optionally with an exit code and its output. From the Pi itself no password or header is needed:
@@ -103,12 +103,13 @@ Add backups, syncs and other periodic work under `"jobs"` in the same file (see 
   ```
 
   `/api/ping/<name>` alone means it worked; `/<exit code>` or `/fail` reports a failure, and the body becomes the log lines in the alert.
+- **A systemd service you run by hand**: `"service": "sync.service"` with no `timer`. It runs only when you press Run now; pi-dash waits for each run, records it like a timer run and alerts when one fails. (systemd forgets a run as soon as a service with no timer stops, so runs started outside the dashboard aren't listed.)
 
 | Field | |
 |---|---|
 | `name`, `description` | shown in the list |
 | `timer`, `user` | the systemd timer, and whether it's a user timer |
-| `service` | the unit the timer starts, if not the timer's name with `.service` |
+| `service` | the unit the timer starts, if not the timer's name with `.service`; without `timer`, the service Run now starts |
 | `every` | how often it should run (`"30m"`, `"6h"`, `"1d"` or seconds); with it, pi-dash alerts when a run is missed |
 | `grace` | how late a run may be before that counts as missed (default 10 % of `every`, at least 10 min) |
 

@@ -37,7 +37,8 @@ class Config(unittest.TestCase):
         self.assertEqual(config.load_services()[0].repo_path.name, "repo")
         jobs = config.load_jobs()
         self.assertEqual([(j.name, j.every, j.service) for j in jobs],
-                         [("backup", 86400, "backup.service"), ("photo-sync", 21600, "")])
+                         [("backup", 86400, "backup.service"), ("photo-sync", 21600, ""),
+                      ("mirror", 0, "mirror.service")])
 
     def test_durations_in_the_registry(self):
         self.assertEqual([config.seconds(v) for v in (300, "300", "45s", "30m", "6h", "1d", "1.5h")],
@@ -747,6 +748,34 @@ class ScheduledJobs(unittest.TestCase):
         self.assertEqual(self.titles(), ["sync failed"])
         self.assertEqual(len(scheduled.status(job)["runs"]), 2)
         self.assertEqual(scheduled.units(), set())  # not registered
+
+    def test_a_service_without_a_timer_runs_by_hand(self):
+        job = config.Job(name="mirror", service="mirror.service", user=True)
+        shows = {"mirror.service": "LoadState=loaded\nActiveState=inactive\nResult=success\nExecMainStatus=0\n"
+                 "ExecMainStartTimestamp=Wed 2026-10-07 03:00:00 EDT\nExecMainExitTimestamp=Wed 2026-10-07 03:00:09 EDT"}
+        codes = {"start": 0}
+        fake = lambda cmd, **kw: (0, shows.get(cmd[3], "")) if cmd[2] == "show" else (codes.get(cmd[2], 0), "")
+        with unittest.mock.patch.object(services, "run", side_effect=fake) as run, \
+             unittest.mock.patch.object(services, "recent_logs", return_value=["sync: 401"]):
+            scheduled._poll_timer(job)  # systemd's own record of a run isn't counted: run_now records it
+            self.assertNotIn("mirror.timer", [c.args[0][3] for c in run.call_args_list])
+            scheduled._check_late(job, time.time() + 30 * 86400)  # no schedule: never late, never "off"
+            st = scheduled.status(job)
+            self.assertEqual((st["kind"], st["state"], st["can_run"], st["has_log"], st["next"]),
+                             ("manual", "waiting", True, True, None))
+            scheduled._run_by_hand(job)
+            self.assertEqual(run.call_args.args[0], ["systemctl", "--user", "start", "--wait", "mirror.service"])
+            self.assertEqual(scheduled.status(job)["state"], "ok")
+            codes["start"] = 1
+            scheduled._run_by_hand(job)
+        st = scheduled.status(job)
+        self.assertEqual((st["state"], st["last"]["code"]), ("failed", 1))
+        self.assertEqual(store.events()[0]["log"], ["sync: 401"])
+        self.assertEqual(self.titles(), ["mirror failed"])
+        shows["mirror.service"] = "LoadState=not-found"
+        with unittest.mock.patch.object(services, "run", side_effect=fake):
+            scheduled._poll_timer(job)
+        self.assertEqual(scheduled.status(job)["state"], "missing")
 
 
 class Password(unittest.TestCase):

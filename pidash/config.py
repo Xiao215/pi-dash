@@ -101,12 +101,13 @@ def seconds(value) -> int:
 
 @dataclass
 class Job:
-    """Something that runs on a schedule: a systemd timer, or anything that pings /api/ping/<name> when done."""
+    """Something that runs on a schedule (a systemd timer, or anything that pings /api/ping/<name> when done),
+    or by hand only: a systemd service with no timer, started from the dashboard."""
     name: str
     description: str = ""
     timer: str = ""                 # systemd timer, e.g. "backup.timer"
     user: bool = False              # a `systemctl --user` timer
-    service: str = ""               # the unit the timer starts (default: the timer's name with .service)
+    service: str = ""               # the unit the timer starts (default: the timer's name with .service); alone: run by hand
     every: int = 0                  # expected interval in seconds (from "6h", "1d", ...); 0: don't watch for missed runs
     grace: int = 0                  # how late a run may be before it counts as missed (default: 10%, at least 10 min)
 

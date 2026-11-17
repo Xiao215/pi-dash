@@ -273,21 +273,25 @@ const JOB_STATE = {
   failed: ["Last run failed", "down"], late: ["Didn't run on time", "unhealthy"], off: ["Timer is off", "unhealthy"],
   missing: ["Timer not found", "down"],
 };
+// a job with no timer, run from the Run now button
+const MANUAL_STATE = { ok: ["Last run worked", "up"], waiting: ["Run by hand", "stopped"], missing: ["Service not found", "down"] };
 
 function renderJobs(data) {
   const jobs = data.jobs || [];
   $("#jobs-section").hidden = !jobs.length;
   if (!jobs.length) return;
   const bad = jobs.filter((j) => ["failed", "late", "off", "missing"].includes(j.state)).length;
-  put($("#jobs-count"), bad ? `${bad} need${bad > 1 ? "" : "s"} attention` : `${jobs.length} on schedule`);
+  put($("#jobs-count"), bad ? `${bad} need${bad > 1 ? "" : "s"} attention` : `${jobs.length} ${jobs.length > 1 ? "jobs" : "job"}, all fine`);
   put($("#jobs"), jobs.map((j) => {
-    const [label, tone] = JOB_STATE[j.state] || [esc(j.state), ""];
+    const [label, tone] = (j.kind === "manual" && MANUAL_STATE[j.state]) || JOB_STATE[j.state] || [esc(j.state), ""];
     const r = j.last;
     const facts = [
       r ? `<span>${r.ok ? "Last run" : "Failed"} <b>${ago(r.t, data.now)}</b>${r.took != null ? ` · took ${dur(r.took)}` : ""}${!r.ok && r.code ? ` · exit code ${r.code}` : ""}</span>` : "",
       j.next ? (j.next > data.now ? `<span>Next <b>in ${dur(j.next - data.now)}</b></span>` : `<span>Was due <b>${ago(j.next, data.now)}</b></span>`) : "",
       j.every ? `<span>Every <b>${every(j.every)}</b></span>` : "",
-      `<span>${j.kind === "timer" ? `${icon("calendar")}${esc(j.timer)}${j.user ? " (user)" : ""}` : `pings <code>/api/ping/${esc(j.name)}</code>`}</span>`,
+      `<span>${j.kind === "timer" ? `${icon("calendar")}${esc(j.timer)}${j.user ? " (user)" : ""}`
+        : j.kind === "manual" ? `${icon("play")}${esc(j.service)}${j.user ? " (user)" : ""} · by hand`
+        : `pings <code>/api/ping/${esc(j.name)}</code>`}</span>`,
     ].filter(Boolean).join("");
     const runs = j.runs.map((x) => `<i class="${x.ok ? "ok" : "bad"}" title="${esc(new Date(x.t * 1000).toLocaleString())} · ${x.ok ? "worked" : "failed"}${x.took != null ? ` in ${dur(x.took)}` : ""}"></i>`).join("");
     const btn = (action, text, ic) => `<button class="btn${action === "logs" ? " quiet" : ""}" data-job="${esc(j.name)}" data-jobaction="${action}" data-kind="${j.kind}">${icon(ic)}<span>${text}</span></button>`;
@@ -299,7 +303,7 @@ function renderJobs(data) {
         <div class="facts">${facts}</div>
       </div>
       <div class="runs" title="Last runs, oldest first">${runs}</div>
-      <div class="actions">${j.has_log ? btn("logs", j.kind === "timer" ? "Logs" : "Output", "logs") : ""}${j.can_run ? btn("run", "Run now", "play") : ""}</div>
+      <div class="actions">${j.has_log ? btn("logs", j.kind === "ping" ? "Output" : "Logs", "logs") : ""}${j.can_run ? btn("run", "Run now", "play") : ""}</div>
     </li>`;
   }).join(""));
 }
@@ -309,10 +313,11 @@ document.addEventListener("click", async (e) => {
   if (!b) return;
   const name = b.dataset.job;
   if (b.dataset.jobaction === "logs") {
-    if (b.dataset.kind === "timer") return showLogs(name, `/api/scheduled/${encodeURIComponent(name)}/logs`);
+    if (b.dataset.kind !== "ping") return showLogs(name, `/api/scheduled/${encodeURIComponent(name)}/logs`);
     return showOutput(name);
   }
-  if (!(await confirmBox(`Run ${name} now?`, "Starts it right away, outside its schedule.", "Run"))) return;
+  const outside = b.dataset.kind === "manual" ? "" : ", outside its schedule";
+  if (!(await confirmBox(`Run ${name} now?`, `Starts it right away${outside}.`, "Run"))) return;
   try {
     await api(`/api/scheduled/${encodeURIComponent(name)}/run`, { method: "POST" });
     toast(`Started ${name}`);

@@ -1,7 +1,9 @@
 """Scheduled jobs: systemd timers, and anything that pings /api/ping/<name> when it finishes (cron jobs,
-scripts on other machines). Alerts when a run fails, and when one doesn't happen on time."""
+scripts on other machines); also systemd services with no timer, run by hand from the dashboard.
+Alerts when a run fails, and when one doesn't happen on time."""
 
 import subprocess
+import threading
 import time
 from types import SimpleNamespace
 
@@ -9,7 +11,8 @@ from . import config, services, store
 from .notify import ago, alert
 
 _jobs = {j.name: j for j in config.load_jobs()}
-timers: dict[str, dict] = {}  # name -> what systemd says about the timer and its last run
+timers: dict[str, dict] = {}  # name -> what systemd says about the timer (if any) and the last run
+_by_hand: set[str] = set()  # jobs with no timer that pi-dash is running now
 
 
 def reload():
@@ -91,13 +94,14 @@ def _show(cmd, unit, props):
 
 
 def _poll_timer(job):
+    """The timer and the service it starts; a job with no timer has only the service."""
     cmd = _systemctl(job)
-    t = _show(cmd, job.timer, "ActiveState,LoadState,NextElapseUSecRealtime,LastTriggerUSec")
-    s = _show(cmd, job.service, "ActiveState,Result,ExecMainStatus,ExecMainStartTimestamp,ExecMainExitTimestamp")
+    t = _show(cmd, job.timer, "ActiveState,LoadState,NextElapseUSecRealtime,LastTriggerUSec") if job.timer else {}
+    s = _show(cmd, job.service, "LoadState,ActiveState,Result,ExecMainStatus,ExecMainStartTimestamp,ExecMainExitTimestamp")
     parse = services._parse_systemd_time
     info = {
-        "found": t.get("LoadState") == "loaded",
-        "active": t.get("ActiveState") == "active",
+        "found": (t if job.timer else s).get("LoadState") == "loaded",
+        "active": t.get("ActiveState") == "active" if job.timer else True,
         "next": parse(t.get("NextElapseUSecRealtime")),
         "last": parse(t.get("LastTriggerUSec")),
         "running": s.get("ActiveState") in ("activating", "active", "deactivating"),
@@ -108,7 +112,7 @@ def _poll_timer(job):
     }
     timers[job.name] = info
     finished = info["finished"]
-    if not finished or info["running"]:
+    if not finished or info["running"] or not job.timer:  # no timer: run_now records the run
         return
     with store.edit_state() as state:
         seen = state.setdefault("job_seen_runs", {})
@@ -172,7 +176,7 @@ def _human(sec):
 def poll():
     now = time.time()
     for job in list(_jobs.values()):
-        if job.timer:
+        if job.service:
             _poll_timer(job)
         _check_late(job, now)
 
@@ -182,10 +186,10 @@ def poll():
 def status(job) -> dict:
     state = store.load_state()
     runs = state.get("job_runs", {}).get(job.name, [])
-    timer = timers.get(job.name) if job.timer else None
+    timer = timers.get(job.name) if job.service else None
     last = runs[-1] if runs else None
     problem = state.get("job_problems", {}).get(job.name)
-    if timer and timer["running"]:
+    if (timer and timer["running"]) or job.name in _by_hand:
         st = "running"
     elif timer and not timer["found"]:
         st = "missing"
@@ -198,12 +202,31 @@ def status(job) -> dict:
     nxt = (timer or {}).get("next")
     if not nxt and job.every and last:
         nxt = last["t"] + job.every
-    return {"name": job.name, "description": job.description, "kind": "timer" if job.timer else "ping",
-            "timer": job.timer, "user": job.user, "every": job.every, "grace": job.grace, "state": st,
-            "last": last, "next": nxt, "runs": runs[-14:], "can_run": bool(job.timer),
-            "has_log": bool(job.timer or state.get("job_logs", {}).get(job.name))}
+    kind = "timer" if job.timer else "manual" if job.service else "ping"
+    return {"name": job.name, "description": job.description, "kind": kind,
+            "timer": job.timer, "service": job.service, "user": job.user, "every": job.every, "grace": job.grace,
+            "state": st, "last": last, "next": nxt, "runs": runs[-14:], "can_run": bool(job.service),
+            "has_log": bool(job.service or state.get("job_logs", {}).get(job.name))}
 
 
 def run_now(job):
-    subprocess.Popen([*_systemctl(job, sudo=True), "start", "--no-block", job.service], env=services.ENV,
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if job.timer:
+        subprocess.Popen([*_systemctl(job, sudo=True), "start", "--no-block", job.service], env=services.ENV,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return
+    if job.name in _by_hand:
+        return
+    _by_hand.add(job.name)
+    threading.Thread(target=_run_by_hand, args=(job,), daemon=True, name=f"run-{job.name}").start()
+
+
+def _run_by_hand(job):
+    """A service with no timer: systemd unloads it, and forgets the run, as soon as it stops; so wait for it here."""
+    try:
+        start = time.time()
+        code, _ = services.run([*_systemctl(job, sudo=True), "start", "--wait", job.service], timeout=86400)
+        ok = code == 0
+        record(job, ok, None if ok else code, time.time() - start,
+               None if ok else services.recent_logs(as_service(job), 30))
+    finally:
+        _by_hand.discard(job.name)

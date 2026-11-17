@@ -718,10 +718,11 @@ def _pending_text(snap):
 def _job_text(j):
     last = j["last"]
     if j["state"] in ("failed", "late", "off", "missing"):
-        word = {"failed": "last run failed", "late": "didn't run on time", "off": "timer is off", "missing": "timer not found"}
+        word = {"failed": "last run failed", "late": "didn't run on time", "off": "timer is off",
+                "missing": "timer not found" if j["timer"] else "service not found"}
         return word[j["state"]]
     if not last:
-        return "hasn't run yet"
+        return "run it by hand" if j["kind"] == "manual" else "hasn't run yet"
     return f"ran {ago(time.time() - last['t'])} ago"
 
 
