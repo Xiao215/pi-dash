@@ -426,6 +426,7 @@ li.open > .ev-log { grid-template-rows: 1fr; }
 }
 .drawer.open { transform: none; visibility: visible; transition: transform .32s var(--ease); }
 .drawer-head { padding: 14px 16px 12px 20px; border-bottom: 1px solid var(--border); display: grid; gap: 12px; }
+.grab { display: none; }
 .drawer-title-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 #drawer-sub { display: flex; align-items: center; gap: 6px; margin-top: 2px; }
 .live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--up); flex: none; }
@@ -652,6 +653,26 @@ body.has-assistant .ev-ask { display: flex; }
 .ev-ask .btn .i { color: var(--info); }
 .ev-ico.agent { background: color-mix(in srgb, var(--info) 12%, transparent); color: var(--info); }
 
+/* ---- phones: the drawers are full-screen sheets that slide up, sized to what the keyboard leaves visible ---- */
+@media (max-width: 900px) {
+  .drawer, .drawer.agent {
+    top: var(--sheet-top, 0); bottom: auto; left: 0; right: 0; width: 100%; height: var(--sheet-h, 100dvh);
+    border-left: 0; transform: translateY(105%); overscroll-behavior: contain;
+  }
+  .drawer.open { transform: none; }
+  .drawer-head { padding: max(6px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) 12px max(16px, env(safe-area-inset-left));
+    touch-action: none; user-select: none; -webkit-user-select: none; }
+  .drawer-head .search, .drawer-head .check { touch-action: manipulation; }
+  .grab { display: block; width: 36px; height: 5px; border-radius: 99px; background: var(--border-strong); margin: 0 auto -4px; }
+  .log { padding-bottom: calc(28px + env(safe-area-inset-bottom)); }
+  .jump { bottom: calc(18px + env(safe-area-inset-bottom)); }
+  .composer { padding-left: max(14px, env(safe-area-inset-left)); padding-right: max(14px, env(safe-area-inset-right)); }
+  .drawer.kb .composer { padding-bottom: 10px; }  /* the keyboard is up: no home bar to keep clear of */
+  .drawer.kb .log { padding-bottom: 28px; }
+  /* 16px or more, or iOS zooms the whole page in when you tap the box */
+  .composer-box textarea, .search input, .run-reply input, textarea.cmd, .field input { font-size: 16px; }
+}
+
 @media (max-width: 760px) {
   .top { padding: 18px 16px 2px; }
   .banner { margin: 10px 16px 0; }
@@ -673,7 +694,7 @@ body.has-assistant .ev-ask { display: flex; }
 
   .ev-log pre { margin-left: 16px; }
   .ev-ask { margin-left: 16px; }
-  .chat { padding: 14px 14px 20px; }
+  .chat { padding: 14px max(14px, env(safe-area-inset-right)) 20px max(14px, env(safe-area-inset-left)); }
   .btn.ask kbd { display: none; }
   .log .line { grid-template-columns: 1fr; }
   .log .ts { font-size: 11px; }
