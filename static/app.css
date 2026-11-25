@@ -660,6 +660,8 @@ body.has-assistant .ev-ask { display: flex; }
     border-left: 0; transform: translateY(105%); overscroll-behavior: contain;
   }
   .drawer.open { transform: none; }
+  /* iOS's keyboard is see-through: the sheet's background carries on down behind it, so the page doesn't show through */
+  .drawer::after { content: ""; position: absolute; left: 0; right: 0; top: 100%; height: 100vh; background: var(--surface); pointer-events: none; }
   .drawer-head { padding: max(6px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) 12px max(16px, env(safe-area-inset-left));
     touch-action: none; user-select: none; -webkit-user-select: none; }
   .drawer-head .search, .drawer-head .check { touch-action: manipulation; }
