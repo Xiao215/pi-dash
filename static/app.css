@@ -660,6 +660,10 @@ body.has-assistant .ev-ask { display: flex; }
     border-left: 0; transform: translateY(105%); overscroll-behavior: contain;
   }
   .drawer.open { transform: none; }
+  /* the height follows the keyboard: same duration and feel as iOS's own keyboard animation */
+  .drawer { transition: transform .32s var(--ease), height .3s cubic-bezier(.38, .7, .125, 1), visibility 0s .32s; }
+  .drawer.open { transition: transform .32s var(--ease), height .3s cubic-bezier(.38, .7, .125, 1); }
+  .chat.at-top, .log.at-top { overscroll-behavior-y: none; }  /* a pull at the top moves the sheet, not a bounce */
   /* iOS's keyboard is see-through: the sheet's background carries on down behind it, so the page doesn't show through */
   .drawer::after { content: ""; position: absolute; left: 0; right: 0; top: 100%; height: 100vh; background: var(--surface); pointer-events: none; }
   .drawer-head { padding: max(6px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) 12px max(16px, env(safe-area-inset-left));

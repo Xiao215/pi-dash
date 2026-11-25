@@ -944,54 +944,81 @@ window.addEventListener("popstate", () => {
 
 // The keyboard covers the bottom of the screen without making the page shorter on iOS:
 // size the open drawer to what's still visible, so the box you type in sits just above the keys.
+let kbH = 0;  // the keyboard's height, once seen, so a sheet can move together with it next time
 function fitSheet() {
   const vv = window.visualViewport;
+  const up = !!vv && window.innerHeight - vv.height > 120;
+  if (up) kbH = window.innerHeight - vv.height;
   for (const el of [$("#drawer"), agentEl]) {
     if (!vv || !phoneSheet.matches) { el.style.removeProperty("--sheet-h"); el.style.removeProperty("--sheet-top"); el.classList.remove("kb"); continue; }
-    el.style.setProperty("--sheet-h", `${vv.height}px`);
-    el.style.setProperty("--sheet-top", `${vv.offsetTop}px`);
-    el.classList.toggle("kb", window.innerHeight - vv.height > 120);  // the keyboard is up: no home-bar gap under the box
+    setSheet(el, vv.height, vv.offsetTop, up);  // up: the keyboard is up, so no home-bar gap under the box
   }
+}
+// The sheet's height animates (see .drawer in the phone styles); a list that was at its newest line stays there meanwhile.
+function setSheet(el, h, top, kb) {
+  const list = el === agentEl ? chatEl : log;
+  const pinned = list.scrollHeight - list.scrollTop - list.clientHeight < 40;
+  el.style.setProperty("--sheet-h", `${h}px`);
+  el.style.setProperty("--sheet-top", `${top}px`);
+  el.classList.toggle("kb", kb);
+  if (!pinned) return;
+  const till = performance.now() + 450;
+  const keep = () => { list.scrollTop = list.scrollHeight; if (performance.now() < till) requestAnimationFrame(keep); };
+  keep();
 }
 window.visualViewport?.addEventListener("resize", fitSheet);
 window.visualViewport?.addEventListener("scroll", fitSheet);
 phoneSheet.addEventListener("change", fitSheet);
+// iOS can report the keyboard's new size only once it has finished moving: start the sheet as the keyboard starts,
+// so the two move together instead of the content jumping afterwards.
+document.addEventListener("focusin", (e) => {
+  const el = e.target.closest?.(".drawer.open");
+  if (el && kbH && phoneSheet.matches && e.target.matches("textarea, input") && !el.classList.contains("kb")) setSheet(el, window.innerHeight - kbH, 0, true);
+});
+document.addEventListener("focusout", (e) => {
+  const el = e.target.closest?.(".drawer.open");
+  if (el && phoneSheet.matches && el.classList.contains("kb") && !el.contains(e.relatedTarget)) setSheet(el, window.innerHeight, 0, false);
+});
 
-/** Swipe down to close: from the header anywhere, from `list` when it's already at its top. */
+/** Swipe down to close: from the header anywhere, from `list` when it's already at its top. Swiping the list down
+ *  with the keyboard up puts the keyboard away instead, as in Messages, while the list scrolls on. Every listener is
+ *  passive, so scrolling never waits for this script: the header takes no native scrolling (touch-action: none), and
+ *  a list at its top has no overscroll (.at-top), so moving the sheet by hand doesn't fight the browser's bounce. */
 function swipeToClose(el, list, close) {
-  let start = null;  // {x, y, t, fromList, drag, lastY, lastT, v}
+  let start = null;  // {x, y, t, fromList, kb, drag, lastY, lastT, v}
   const scrim = $("#scrim");
+  const atTop = () => list.classList.toggle("at-top", list.scrollTop <= 0);
+  list.addEventListener("scroll", atTop, { passive: true });
   el.addEventListener("touchstart", (e) => {
     start = null;
     if (!phoneSheet.matches || e.touches.length !== 1 || e.target.closest("textarea, input, select")) return;
     const inHead = !!e.target.closest(".drawer-head"), inList = list.contains(e.target);
-    if (!inHead && !(inList && list.scrollTop <= 0)) return;
+    if (inList) atTop();
+    const typing = document.activeElement?.matches?.("textarea, input") && el.contains(document.activeElement);
+    if (!inHead && !(inList && (list.scrollTop <= 0 || typing))) return;
     const t = e.touches[0];
-    start = { x: t.clientX, y: t.clientY, t: e.timeStamp, fromList: !inHead, drag: false, lastY: t.clientY, lastT: e.timeStamp, v: 0 };
+    start = { x: t.clientX, y: t.clientY, t: e.timeStamp, fromList: !inHead, kb: typing, drag: false, lastY: t.clientY, lastT: e.timeStamp, v: 0 };
   }, { passive: true });
   el.addEventListener("touchmove", (e) => {
-    if (!start) {
-      // Nothing to scroll here (the header, the box at the bottom): don't let the touch move the page.
-      if (phoneSheet.matches && e.cancelable && !e.target.closest(".chat, .log, textarea")) e.preventDefault();
-      return;
-    }
+    if (!start) return;
     const t = e.touches[0], dy = t.clientY - start.y, dx = t.clientX - start.x;
     if (!start.drag) {
       if (Math.abs(dy) < 8 && Math.abs(dx) < 8) return;
-      // Up, sideways, or the list has scrolled meanwhile: this is a scroll, not a swipe.
-      if (dy <= 0 || Math.abs(dx) > dy || (start.fromList && list.scrollTop > 0)) { start = null; return; }
+      // Up or sideways: this is a scroll, not a swipe.
+      if (dy <= 0 || Math.abs(dx) > dy) { start = null; return; }
+      if (start.fromList && start.kb) { document.activeElement.blur(); start = null; return; }
+      if (start.fromList && list.scrollTop > 0) { start = null; return; }
       start.drag = true;
       el.style.transition = "none";
       scrim.style.transition = "none";
     }
-    if (e.cancelable) e.preventDefault();
     const y = Math.max(0, dy);
     el.style.transform = `translateY(${y}px)`;
     scrim.style.opacity = String(Math.max(0, 1 - y / el.offsetHeight));
     const dt = e.timeStamp - start.lastT;
     if (dt > 0) start.v = (t.clientY - start.lastY) / dt;
     start.lastY = t.clientY; start.lastT = e.timeStamp;
-  }, { passive: false });
+  }, { passive: true });
   const end = () => {
     const s = start;
     start = null;
