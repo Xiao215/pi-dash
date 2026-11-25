@@ -887,6 +887,124 @@ async function refresh() {
 setInterval(() => { if (!document.hidden) refresh(); }, 5000);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
 
+// ---- drawers as sheets: on a phone they fill the screen like a native sheet ----------------------
+// The page behind can't scroll, swiping the header (or the list from its top) down closes it,
+// and the back gesture closes it instead of leaving the page.
+
+const phoneSheet = matchMedia("(max-width: 900px)");
+const sheetOpen = () => $("#drawer").classList.contains("open") || agentOpen();
+let lockedY = null;    // the page's scroll position while a drawer holds it still
+let sheetEntry = false;  // we pushed a history entry for the open drawer: back closes it
+if (history.state?.sheet) history.replaceState(null, "");  // reloaded with a drawer's entry current
+
+function lockScroll() {
+  document.body.style.overflow = "hidden";
+  if (!phoneSheet.matches || lockedY !== null) return;
+  // iOS scrolls a body with overflow:hidden anyway; pinning it in place doesn't, and keeps where we were.
+  lockedY = window.scrollY;
+  Object.assign(document.body.style, { position: "fixed", top: `-${lockedY}px`, left: "0", right: "0", width: "100%" });
+  document.documentElement.style.overscrollBehavior = "none";
+}
+function unlockScroll() {
+  document.body.style.overflow = "";
+  if (lockedY === null) return;
+  Object.assign(document.body.style, { position: "", top: "", left: "", right: "", width: "" });
+  document.documentElement.style.overscrollBehavior = "";
+  window.scrollTo(0, lockedY);
+  lockedY = null;
+}
+
+/** A drawer opened: hold the page still, and on a phone give back something to close. */
+function sheetOpened(el) {
+  if (phoneSheet.matches) {
+    // Before the page is pinned: going back restores the scroll position saved with the entry we leave.
+    if (sheetEntry) history.replaceState({ sheet: el.id }, "");  // one drawer swapped for the other
+    else { history.pushState({ sheet: el.id }, ""); sheetEntry = true; }
+  }
+  lockScroll();
+  fitSheet();
+}
+/** A drawer closed. `how`: "x" (a button, Escape, a swipe), "back" (the browser's back), "swap" (the other one opens). */
+function sheetClosed(el, how) {
+  el.style.transform = ""; el.style.transition = "";
+  $("#scrim").style.opacity = "";
+  if (how === "swap") return;
+  if (!sheetOpen()) unlockScroll();
+  if (sheetEntry) {
+    sheetEntry = false;
+    if (how !== "back" && history.state?.sheet) history.back();
+  }
+}
+window.addEventListener("popstate", () => {
+  if (!sheetEntry || history.state?.sheet) return;
+  sheetEntry = false;
+  if (agentOpen()) closeAgent("back");
+  if ($("#drawer").classList.contains("open")) closeDrawer("back");
+});
+
+// The keyboard covers the bottom of the screen without making the page shorter on iOS:
+// size the open drawer to what's still visible, so the box you type in sits just above the keys.
+function fitSheet() {
+  const vv = window.visualViewport;
+  for (const el of [$("#drawer"), agentEl]) {
+    if (!vv || !phoneSheet.matches) { el.style.removeProperty("--sheet-h"); el.style.removeProperty("--sheet-top"); el.classList.remove("kb"); continue; }
+    el.style.setProperty("--sheet-h", `${vv.height}px`);
+    el.style.setProperty("--sheet-top", `${vv.offsetTop}px`);
+    el.classList.toggle("kb", window.innerHeight - vv.height > 120);  // the keyboard is up: no home-bar gap under the box
+  }
+}
+window.visualViewport?.addEventListener("resize", fitSheet);
+window.visualViewport?.addEventListener("scroll", fitSheet);
+phoneSheet.addEventListener("change", fitSheet);
+
+/** Swipe down to close: from the header anywhere, from `list` when it's already at its top. */
+function swipeToClose(el, list, close) {
+  let start = null;  // {x, y, t, fromList, drag, lastY, lastT, v}
+  const scrim = $("#scrim");
+  el.addEventListener("touchstart", (e) => {
+    start = null;
+    if (!phoneSheet.matches || e.touches.length !== 1 || e.target.closest("textarea, input, select")) return;
+    const inHead = !!e.target.closest(".drawer-head"), inList = list.contains(e.target);
+    if (!inHead && !(inList && list.scrollTop <= 0)) return;
+    const t = e.touches[0];
+    start = { x: t.clientX, y: t.clientY, t: e.timeStamp, fromList: !inHead, drag: false, lastY: t.clientY, lastT: e.timeStamp, v: 0 };
+  }, { passive: true });
+  el.addEventListener("touchmove", (e) => {
+    if (!start) {
+      // Nothing to scroll here (the header, the box at the bottom): don't let the touch move the page.
+      if (phoneSheet.matches && e.cancelable && !e.target.closest(".chat, .log, textarea")) e.preventDefault();
+      return;
+    }
+    const t = e.touches[0], dy = t.clientY - start.y, dx = t.clientX - start.x;
+    if (!start.drag) {
+      if (Math.abs(dy) < 8 && Math.abs(dx) < 8) return;
+      // Up, sideways, or the list has scrolled meanwhile: this is a scroll, not a swipe.
+      if (dy <= 0 || Math.abs(dx) > dy || (start.fromList && list.scrollTop > 0)) { start = null; return; }
+      start.drag = true;
+      el.style.transition = "none";
+      scrim.style.transition = "none";
+    }
+    if (e.cancelable) e.preventDefault();
+    const y = Math.max(0, dy);
+    el.style.transform = `translateY(${y}px)`;
+    scrim.style.opacity = String(Math.max(0, 1 - y / el.offsetHeight));
+    const dt = e.timeStamp - start.lastT;
+    if (dt > 0) start.v = (t.clientY - start.lastY) / dt;
+    start.lastY = t.clientY; start.lastT = e.timeStamp;
+  }, { passive: false });
+  const end = () => {
+    const s = start;
+    start = null;
+    if (!s?.drag) return;
+    const dy = s.lastY - s.y;
+    el.style.transition = ""; scrim.style.transition = "";
+    if (dy > 90 || (s.v > 0.5 && dy > 30)) close();  // far enough, or a quick flick
+    else { el.style.transform = ""; scrim.style.opacity = ""; }  // spring back
+  };
+  el.addEventListener("touchend", end);
+  el.addEventListener("touchcancel", end);
+}
+
 // ---- drawer: live logs + job output -----------------------------------------------
 
 const log = $("#log");
@@ -906,21 +1024,22 @@ function openDrawer(title) {
   $("#log-search").value = ""; filterText = "";
   $("#errors-only").checked = false; log.classList.remove("errors-only");
   following = true; unseen = 0; $("#jump").hidden = true;
+  const wasOpen = $("#drawer").classList.contains("open");
   $("#drawer").classList.add("open");
   $("#drawer").setAttribute("aria-hidden", "false");
   $("#scrim").classList.add("open");
-  document.body.style.overflow = "hidden";
+  if (!wasOpen) sheetOpened($("#drawer"));
 }
 function closeStreams() {
   if (stream) { stream.close(); stream = null; }
   if (jobTimer) { clearTimeout(jobTimer); jobTimer = null; }
 }
-function closeDrawer() {
+function closeDrawer(how = "x") {
   closeStreams();
   $("#drawer").classList.remove("open");
   $("#drawer").setAttribute("aria-hidden", "true");
-  $("#scrim").classList.remove("open");
-  document.body.style.overflow = "";
+  if (how !== "swap") $("#scrim").classList.remove("open");
+  sheetClosed($("#drawer"), how);
 }
 
 function highlight(msg) {
@@ -1056,7 +1175,8 @@ $("#log-search").addEventListener("input", (e) => {
 });
 $("#wrap").onchange = (e) => log.classList.toggle("wrap", e.target.checked);
 $("#errors-only").onchange = (e) => log.classList.toggle("errors-only", e.target.checked);
-$("#drawer-close").onclick = closeDrawer;
+$("#drawer-close").onclick = () => closeDrawer();
+swipeToClose($("#drawer"), log, () => closeDrawer());
 $("#scrim").onclick = () => (agentOpen() ? closeAgent() : closeDrawer());
 
 // ---- dialogs, menus, actions ------------------------------------------------------
@@ -1590,23 +1710,28 @@ const agentOpen = () => agentEl.classList.contains("open");
 
 async function openAgent({ chatId = null, context = null, ask = "" } = {}) {
   closeMenus();
-  if ($("#drawer").classList.contains("open")) closeDrawer();
+  const wasOpen = agentOpen();
+  if ($("#drawer").classList.contains("open")) closeDrawer("swap");
   agentEl.classList.add("open");
   agentEl.setAttribute("aria-hidden", "false");
   $("#scrim").classList.add("open");
-  document.body.style.overflow = "hidden";
+  if (!wasOpen) sheetOpened(agentEl);
+  // Now, while still in the tap: iOS only raises the keyboard for a focus the tap itself made.
+  // Not when it asks for you: the answer is what you're there to read.
+  if (!ask && !askInput.disabled) askInput.focus({ preventScroll: true });
   await loadAgent();
   if (chatId) showChat(chatId);
   else showHome(context);
   if (ask) { askInput.value = ask; submitAsk(); }
 }
-function closeAgent() {
+function closeAgent(how = "x") {
   stopChatStream();
   chatGen++;
+  if (agentEl.contains(document.activeElement)) document.activeElement.blur();  // and the keyboard with it
   agentEl.classList.remove("open");
   agentEl.setAttribute("aria-hidden", "true");
   $("#scrim").classList.remove("open");
-  document.body.style.overflow = "";
+  sheetClosed(agentEl, how);
 }
 function stopChatStream() {
   if (chatSource) { chatSource.close(); chatSource = null; }
@@ -1638,7 +1763,7 @@ function showHome(context = null) {
   chatEl.innerHTML = html;
   renderContext();
   syncComposer();
-  setTimeout(() => askInput.focus(), 50);
+  setTimeout(() => { if (agentOpen()) askInput.focus({ preventScroll: true }); }, 50);
 }
 
 function showChat(id) {
@@ -1979,17 +2104,20 @@ async function decideAsk(call, run) {
   }
 }
 
-$("#composer").addEventListener("submit", (e) => { e.preventDefault(); submitAsk(); });
+$("#composer").addEventListener("submit", (e) => { e.preventDefault(); submitAsk(); askInput.focus({ preventScroll: true }); });
 askInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); submitAsk(); }
 });
+// Pressing send or the paperclip keeps the box focused, so the keyboard stays up between messages.
+for (const id of ["#ask-send", "#ask-attach"]) $(id).addEventListener("mousedown", (e) => { if (document.activeElement === askInput) e.preventDefault(); });
 askInput.addEventListener("input", () => { autosize(); syncComposer(); });
 $("#ask-btn").onclick = () => {
   const b = $("#ask-btn");
   if (b.classList.contains("off")) return toast(askOff, true);
   openAgent();  // also while still checking: the panel says what it finds
 };
-$("#agent-close").onclick = closeAgent;
+$("#agent-close").onclick = () => closeAgent();
+swipeToClose(agentEl, chatEl, () => closeAgent());
 $("#agent-new").onclick = async () => { await loadAgent(); showHome(); };
 $("#agent-ctx").addEventListener("click", (e) => {
   if (e.target.closest("#ctx-remove")) { askContext = null; renderContext(); askInput.focus(); }
