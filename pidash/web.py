@@ -19,6 +19,7 @@ from . import agent, auth, config, notify, scheduled, services, store, system, w
 log = logging.getLogger(__name__)
 STATIC = Path(__file__).resolve().parent.parent / "static"
 TAILNET = (ipaddress.ip_network("100.64.0.0/10"), ipaddress.ip_network("fd7a:115c:a1e0::/48"))
+CHAT_BODY_LIMIT = 8 * 1024 * 1024  # a chat message with up to 4 photos; every other request stays under 64 KB
 
 
 _version = {"key": None, "value": ""}
@@ -388,15 +389,20 @@ class Handler(BaseHTTPRequestHandler):
     def _agent_post(self, rest):
         if not self._over_tailscale():
             return self._json({"error": "The assistant only answers over Tailscale."}, 403)
-        body = self._body()
+        message = rest == ["chats"] or (len(rest) == 3 and rest[0] == "chats" and rest[2] == "messages")
+        if message and self._length() >= CHAT_BODY_LIMIT:
+            self.close_connection = True  # the body is left unread
+            return self._json({"error": "That's too much to send at once. Try fewer or smaller photos."}, 413)
+        body = self._body(CHAT_BODY_LIMIT if message else 65536)  # messages may carry photos
         text = body.get("text") if isinstance(body.get("text"), str) else ""
+        images = body.get("images") or []
         try:
             if rest == ["chats"]:
-                return self._json(agent.new_chat(text, body.get("context")))
+                return self._json(agent.new_chat(text, body.get("context"), images))
             if len(rest) == 3 and rest[0] == "chats":
                 cid, action = rest[1], rest[2]
                 if action == "messages":
-                    return self._json(agent.send(cid, text))
+                    return self._json(agent.send(cid, text, images))
                 if action == "decide":
                     command = body.get("command") if isinstance(body.get("command"), str) else None
                     return self._json(agent.decide(cid, str(body.get("call", "")), body.get("run") is True, command))
@@ -445,10 +451,11 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             return 0
 
-    def _body(self) -> dict:
+    def _body(self, limit=65536) -> dict:
+        """The JSON object sent, or {} when there's none or it's `limit` bytes or more."""
         n = self._length()
         try:
-            body = json.loads(self.rfile.read(n) or b"{}") if 0 < n < 65536 else {}
+            body = json.loads(self.rfile.read(n) or b"{}") if 0 < n < limit else {}
         except ValueError:
             return {}
         return body if isinstance(body, dict) else {}

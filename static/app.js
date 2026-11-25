@@ -1795,7 +1795,7 @@ function chatBlocks() {
   for (const b of out) {
     const e = b.e;
     b.html = b.items ? stepsHtml(b.items, b.key)
-      : e.type === "user" ? `${e.about ? `<p class="you-about">${icon("sparkle")}About: ${esc(e.about)}</p>` : ""}<div class="you">${esc(e.text)}</div>`
+      : e.type === "user" ? `${e.about ? `<p class="you-about">${icon("sparkle")}About: ${esc(e.about)}</p>` : ""}<div class="you">${esc(e.text)}${e.images ? `<span class="you-photos${e.text ? "" : " only"}" title="${e.images} photo${e.images > 1 ? "s" : ""}">📷 ${e.images}</span>` : ""}</div>`
       : e.type === "text" ? `<div class="say${e.done ? "" : " typing"}">${md(e.text)}</div>`
       : e.type === "flag" ? `<div class="note warn">${icon("alert")}<span>${esc(e.text)}</span></div>`
       : e.type === "note" ? `<div class="note ${esc(e.level)}">${icon(NOTE_ICON[e.level] || "info")}<span>${esc(e.text)}</span></div>`
@@ -1856,7 +1856,10 @@ const chatBusy = () => chat && ["thinking", "running"].includes(chat.status);
 function syncComposer() {
   const blocked = Boolean(agentInfo?.problem) && !chat;
   askInput.disabled = blocked;
-  const stop = chatBusy() && !askInput.value.trim();
+  const attach = $("#ask-attach");
+  attach.disabled = blocked;
+  cls(attach, `btn quiet attach${photos.length + photosLoading >= MAX_PHOTOS ? " full" : ""}`);
+  const stop = chatBusy() && !askInput.value.trim() && !photos.length && !photosLoading;
   const b = $("#ask-send");
   cls(b, stop ? "btn stop" : "btn accent");
   put(b, icon(stop ? "stop" : "send"));
@@ -1871,27 +1874,95 @@ function autosize() {
   askInput.style.height = `${Math.min(askInput.scrollHeight, 140)}px`;
 }
 
+// ---- photos to go with the next message: shrunk here, so a phone's 12 MP shot goes as a few hundred KB
+
+const MAX_PHOTOS = 4, PHOTO_EDGE = 1600, PHOTO_QUALITY = 0.85;
+let photos = [];       // data: URLs (JPEG) waiting to be sent
+let photosLoading = 0; // ones still being shrunk
+
+/** A picked image file as a JPEG data: URL, at most PHOTO_EDGE px on its long side, on white (for transparent PNGs). */
+async function shrinkPhoto(file) {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = new Image();
+    img.src = url;
+    await img.decode();
+    const scale = Math.min(1, PHOTO_EDGE / Math.max(img.naturalWidth, img.naturalHeight));
+    const w = Math.max(1, Math.round(img.naturalWidth * scale)), h = Math.max(1, Math.round(img.naturalHeight * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = w; canvas.height = h;
+    const g = canvas.getContext("2d");
+    g.fillStyle = "#fff";
+    g.fillRect(0, 0, w, h);
+    g.drawImage(img, 0, 0, w, h);
+    return canvas.toDataURL("image/jpeg", PHOTO_QUALITY);
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+async function addPhotos(files) {
+  const picked = [...files].filter((f) => !f.type || f.type.startsWith("image/"));
+  const room = MAX_PHOTOS - photos.length - photosLoading;
+  if (picked.length > room) toast(`Up to ${MAX_PHOTOS} photos per message.`, true);
+  const take = picked.slice(0, Math.max(0, room));
+  photosLoading += take.length;
+  renderPhotos();
+  await Promise.all(take.map(async (f) => {
+    try { photos.push(await shrinkPhoto(f)); } catch { toast(`Couldn't read ${f.name || "that photo"}.`, true); }
+    photosLoading--;
+    renderPhotos();
+  }));
+}
+
+function renderPhotos() {
+  put($("#ask-photos"), photos.map((p, i) => `<span class="photo"><img src="${esc(p)}" alt="Photo ${i + 1}"><button type="button" data-photo="${i}" title="Remove" aria-label="Remove photo ${i + 1}">${icon("x")}</button></span>`).join("")
+    + `<span class="photo loading"><span class="spin"></span></span>`.repeat(photosLoading));
+  syncComposer();
+}
+
+$("#ask-attach").onclick = () => {
+  if (photos.length + photosLoading >= MAX_PHOTOS) return toast(`Up to ${MAX_PHOTOS} photos per message.`, true);
+  $("#ask-file").click();
+};
+$("#ask-file").addEventListener("change", (e) => {
+  addPhotos(e.target.files);
+  e.target.value = "";  // picking the same photo again still counts as a change
+});
+$("#ask-photos").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-photo]");
+  if (!b) return;
+  photos.splice(Number(b.dataset.photo), 1);
+  renderPhotos();
+  askInput.focus();
+});
+
 async function submitAsk() {
   const text = askInput.value.trim();
-  if (!text) {
+  if (photosLoading) return toast("Still getting the photos ready…");
+  const images = photos;
+  if (!text && !images.length) {
     if (chatBusy()) await api(`/api/agent/chats/${chat.id}/stop`, { method: "POST" }).catch((e) => toast(e.message, true));
     return;
   }
   askInput.value = "";
+  photos = [];
+  renderPhotos();
   autosize();
   syncComposer();
   try {
     if (chat) {
-      await api(`/api/agent/chats/${chat.id}/messages`, { method: "POST", body: JSON.stringify({ text }) });
+      await api(`/api/agent/chats/${chat.id}/messages`, { method: "POST", body: JSON.stringify({ text, images }) });
     } else {
-      const c = await api("/api/agent/chats", { method: "POST", body: JSON.stringify({ text, context: askContext }) });
+      const c = await api("/api/agent/chats", { method: "POST", body: JSON.stringify({ text, images, context: askContext }) });
       showChat(c.id);
       loadAgent();
     }
   } catch (e) {
     toast(e.message, true);
     askInput.value = text;
-    syncComposer();
+    photos = [...images, ...photos].slice(0, MAX_PHOTOS);
+    renderPhotos();
   }
 }
 

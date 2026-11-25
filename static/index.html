@@ -50,7 +50,8 @@
       <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
       <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.06 12.35a1 1 0 0 1 0-.7 10.75 10.75 0 0 1 19.88 0 1 1 0 0 1 0 .7 10.75 10.75 0 0 1-19.88 0"/><circle cx="12" cy="12" r="3"/></symbol>
       <symbol id="i-hand" viewBox="0 0 24 24"><path d="M18 11V6a2 2 0 0 0-4 0v5M14 10V4a2 2 0 0 0-4 0v6M10 10.5V6a2 2 0 0 0-4 0v8"/><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15"/></symbol>
-      <symbol id="i-external" viewBox="0 0 24 24"><path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></symbol>
+      <symbol id="i-paperclip" viewBox="0 0 24 24"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></symbol>
+      <symbol id="i-external"viewBox="0 0 24 24"><path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></symbol>
     </defs>
   </svg>
 
@@ -205,7 +206,10 @@
     <div class="chat" id="chat" tabindex="0"></div>
     <form class="composer" id="composer">
       <div class="composer-ctx" id="agent-ctx"></div>
+      <div class="composer-photos" id="ask-photos"></div>
       <div class="composer-box">
+        <input type="file" id="ask-file" accept="image/*" multiple hidden>
+        <button type="button" class="btn quiet attach" id="ask-attach" title="Add photos (up to 4)" aria-label="Add photos"><svg class="i"><use href="#i-paperclip"/></svg></button>
         <label class="sr-only" for="ask-input">Message</label>
         <textarea rows="1" id="ask-input" placeholder="Ask about the Pi, a service, an alert…" autocomplete="off"></textarea>
         <button class="btn accent" id="ask-send" title="Send"><svg class="i"><use href="#i-send"/></svg></button>

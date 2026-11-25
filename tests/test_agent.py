@@ -152,6 +152,9 @@ class FakeClient:
         return FakeStream(self.replies.pop(0))
 
 
+PHOTO = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=="
+
+
 class Chat(unittest.TestCase):
     def setUp(self):
         self.ran = []
@@ -383,6 +386,70 @@ class Chat(unittest.TestCase):
             agent._find(agent._chats[cid], "t1")["state"] = "waiting"
         agent.delete(cid)  # one that waits for you can go
 
+    # ---- photos ----
+
+    def test_a_photo_goes_before_the_text(self):
+        fake = self.client(reply(say("A cat.")))
+        chat = self.settle(agent.new_chat("what's this?", images=[PHOTO])["id"], "idle")
+        sent = fake.sent[0][0]["content"]
+        self.assertEqual([b["type"] for b in sent], ["text", "image", "text"])
+        self.assertEqual(sent[1]["source"], {"type": "base64", "media_type": "image/png", "data": PHOTO.split(",")[1]})
+        self.assertEqual(sent[2]["text"], "what's this?")
+        self.assertEqual(self.events(chat, "user")[0]["images"], 1)
+
+    def test_a_photo_alone_is_enough(self):
+        fake = self.client(reply(say("A cat.")))
+        chat = self.settle(agent.new_chat("  ", images=[PHOTO, PHOTO])["id"], "idle")
+        self.assertEqual([b["type"] for b in fake.sent[0][0]["content"]], ["text", "image", "image"])
+        self.assertEqual(chat["title"], "2 photos")
+        with self.assertRaises(ValueError):
+            agent.new_chat("  ", images=[])
+
+    def test_bad_photos_are_refused(self):
+        self.assertEqual(agent.image_blocks(None), [])
+        for bad in [["data:text/plain;base64,aGk="], ["data:image/svg+xml;base64,aGk="], ["data:image/png;base64,a b"],
+                    ["data:image/png;base64,aGk=\n"], ["https://example.org/cat.png"], [42], [PHOTO] * 5,
+                    ["data:image/jpeg;base64," + "A" * agent.MAX_IMAGE_CHARS], "data:image/png;base64,aGk=",
+                    {"url": PHOTO}]:
+            with self.assertRaises(ValueError, msg=repr(bad)[:80]):
+                agent.image_blocks(bad)
+        fake = self.client()
+        with self.assertRaises(ValueError):
+            agent.new_chat("look", images=["data:image/bmp;base64,aGk="])
+        self.assertEqual(fake.sent, [])
+        self.assertEqual(len(agent.image_blocks(["data:image/jpeg;base64," + "A" * 4_000_000] * 4)), 4)
+
+    def test_a_queued_message_keeps_its_photos(self):
+        fake = self.client(reply(call("t1", "run_command", command="touch x", title="t", why="", effects=[])),
+                           reply(say("ok")))
+        cid = agent.new_chat("make x")["id"]
+        self.settle(cid, "waiting")
+        with agent._lock:  # the command runs: what you write waits for its result
+            agent._find(agent._chats[cid], "t1")["state"] = "running"
+        agent.send(cid, "and what's this?", images=[PHOTO])
+        with agent._lock:
+            queued = agent._chats[cid]["queued"]
+            self.assertEqual(queued[0]["text"], "and what's this?")
+            self.assertEqual(queued[0]["images"][0]["type"], "image")
+        agent._ran(cid, "t1", ["done"], 0)
+        self.settle(cid, "idle")
+        self.assertEqual([b["type"] for b in fake.sent[1][-1]["content"]], ["tool_result", "image", "text"])
+
+    def test_old_queued_strings_still_work(self):
+        self.assertEqual(agent._user_blocks(["hi", {"text": "", "images": [{"type": "image"}]}]),
+                         [{"type": "text", "text": "hi"}, {"type": "image"}])
+
+    def test_saved_chats_forget_photos_once_answered(self):
+        fake = self.client(reply(call("t1", "dashboard")), reply(say("A cat.")))
+        cid = agent.new_chat("what's this?", images=[PHOTO])["id"]
+        self.settle(cid, "idle")
+        self.assertEqual(fake.sent[1][0]["content"][1]["type"], "image")  # still seen while it works on the turn
+        saved = agent._path(cid).read_text()
+        self.assertNotIn(PHOTO.split(",")[1], saved)
+        self.assertNotIn('"image"', saved)
+        self.assertIn(agent.PHOTO_GONE, saved)
+        self.assertEqual(self.events(agent._chats[cid], "user")[0]["images"], 1)
+
     def test_events_since(self):
         self.client(reply(say("hello")))
         cid = agent.new_chat("hi")["id"]
@@ -490,6 +557,27 @@ class AssistantHttp(unittest.TestCase):
 
     def test_changes_need_the_header(self):
         self.assertEqual(self.request("/api/agent/chats/abc/stop", "POST", {}, header=False)[0], 403)
+
+    def test_a_message_with_photos_is_not_dropped(self):
+        """Over 64 KB: other requests ignore a body that big, chat messages take up to 8 MB."""
+        fake = FakeClient(reply(say("A cat.")))
+        with unittest.mock.patch.object(agent, "_sdk_problem", lambda: ""), \
+                unittest.mock.patch.object(agent, "_snapshot", lambda: "{}"), \
+                unittest.mock.patch.object(agent, "_client", lambda: fake):
+            big = "data:image/jpeg;base64," + "A" * 100_000
+            code, body = self.request("/api/agent/chats", "POST", {"text": "what's this?", "images": [big]})
+            self.assertEqual(code, 200, body)
+            end = time.time() + 5
+            while (agent.since(body["id"], 0)["status"] != "idle" or body["id"] in agent._working) and time.time() < end:
+                time.sleep(0.02)
+            self.assertEqual(fake.sent[0][0]["content"][1]["source"]["data"], "A" * 100_000)
+            code, bad = self.request(f"/api/agent/chats/{body['id']}/messages", "POST",
+                                     {"text": "and this", "images": ["data:image/bmp;base64,AAAA"]})
+            self.assertEqual(code, 409)
+            self.assertIn("JPEG", bad["error"])
+        # anything else stays under 64 KB: a body this big is read as empty, so this mutes nothing
+        code, body = self.request("/api/mute", "POST", {"hours": 1, "pad": "x" * 100_000})
+        self.assertEqual((code, body["muted_until"]), (200, 0))
 
     def test_unknown_chat(self):
         self.assertEqual(self.request("/api/agent/chats/000000000000/decide", "POST", {"call": "x", "run": True})[0], 404)

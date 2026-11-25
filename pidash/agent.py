@@ -1,8 +1,9 @@
 """The assistant: chats with Claude that look around the Pi on their own and wait for you before changing anything.
 
 Each chat is a file in STATE_DIR/agent. The conversation sent to the API is only ever appended to, so it goes back
-exactly as the model wrote it. While a chat has something to do, a worker thread asks the model, runs the read-only
-tools it calls (policy.py decides which those are) and stops at the first change, which waits as a card until you
+exactly as the model wrote it; photos are the one exception: once answered, each becomes a line of text, so files
+stay small. While a chat has something to do, a worker thread asks the model, runs the read-only tools it calls
+(policy.py decides which those are) and stops at the first change, which waits as a card until you
 decide. Approved commands run as transient systemd --user units, outside pi-dash's own cgroup, so restarting
 pi-dash (or an upgrade doing it) can't cut them off halfway. Each runs in a terminal (script(1)), so output comes as it's
 written and prompts show; its log is read back from a file, and what you type on the card goes in through a FIFO."""
@@ -297,13 +298,64 @@ def _context_text(context) -> str:
     return policy.redact(json.dumps(keep, ensure_ascii=False)) if keep else ""
 
 
-def new_chat(text: str, context=None) -> dict:
+IMAGE_URL = re.compile(r"^data:(image/(?:jpeg|png|webp|gif));base64,([A-Za-z0-9+/=]+)$")
+MAX_IMAGES = 4
+MAX_IMAGE_CHARS = 6_000_000  # one data: URL; the page sends JPEGs of at most 1600 px, far smaller
+PHOTO_GONE = "[photo sent earlier]"
+
+
+def image_blocks(urls) -> list:
+    """Photos from the page (data: URLs) as image blocks for the API. ValueError when they won't do."""
+    if not urls:
+        return []
+    if not isinstance(urls, (list, tuple)):
+        raise ValueError("Photos must come as a list.")
+    if len(urls) > MAX_IMAGES:
+        raise ValueError(f"Up to {MAX_IMAGES} photos per message.")
+    blocks = []
+    for url in urls:
+        if not isinstance(url, str) or len(url) >= MAX_IMAGE_CHARS:
+            raise ValueError("A photo is too big. Try a smaller one.")
+        m = IMAGE_URL.fullmatch(url)
+        if not m:
+            raise ValueError("That photo isn't a JPEG, PNG, WebP or GIF.")
+        blocks.append({"type": "image", "source": {"type": "base64", "media_type": m[1], "data": m[2]}})
+    return blocks
+
+
+def _user_blocks(items) -> list:
+    """What you wrote, as content blocks: each message's photos, then its text. Items are {"text", "images"}
+    (or plain strings, as chats saved before photos keep them)."""
+    blocks = []
+    for item in items:
+        if isinstance(item, str):
+            item = {"text": item}
+        blocks += item.get("images") or []
+        if item.get("text"):
+            blocks.append({"type": "text", "text": item["text"]})
+    return blocks
+
+
+def _forget_images(chat):
+    """Once the model has answered, the photos it saw become a line of text, so saved chats stay small."""
+    for m in chat["messages"]:
+        if m["role"] == "user" and isinstance(m["content"], list) and any(b.get("type") == "image" for b in m["content"]):
+            m["content"] = [{"type": "text", "text": PHOTO_GONE} if b.get("type") == "image" else b for b in m["content"]]
+
+
+def _check_message(text, images):
     text = text.strip()
-    if not text:
+    photos = image_blocks(images)
+    if not text and not photos:
         raise ValueError("Write something first.")
     why = problem()
     if why:
         raise ValueError(why)
+    return text[:8000], photos
+
+
+def new_chat(text: str, context=None, images=()) -> dict:
+    text, photos = _check_message(text, images)
     prune()
     cid = secrets.token_hex(6)
     about = _context_text(context)
@@ -314,35 +366,32 @@ def new_chat(text: str, context=None) -> dict:
     content = [{"type": "text", "text": f"<dashboard as of {_clock(time.time())}>\n{view}\n</dashboard>"}]
     if about:
         content.append({"type": "text", "text": f"<asked_from_activity_entry>\n{about}\n</asked_from_activity_entry>"})
-    content.append({"type": "text", "text": text[:8000]})
-    chat = {"id": cid, "title": text[:80], "created": time.time(), "updated": time.time(), "status": "idle",
+    content += _user_blocks([{"text": text, "images": photos}])
+    title = text[:80] or ("A photo" if len(photos) == 1 else f"{len(photos)} photos")
+    chat = {"id": cid, "title": title, "created": time.time(), "updated": time.time(), "status": "idle",
             "seq": 0, "messages": [{"role": "user", "content": content}], "events": [], "pending": {},
             "round": [], "results": {}, "queued": [], "cost": 0.0, "rounds": 0}
     with _lock:
         _chats[cid] = chat
-        _event(chat, type="user", text=text[:8000],
+        _event(chat, type="user", text=text, images=len(photos),
                about=str(context.get("title", ""))[:120] if isinstance(context, dict) else "")
         _start(chat)
     return summary(chat)
 
 
-def send(cid, text: str) -> dict:
-    text = text.strip()
-    if not text:
-        raise ValueError("Write something first.")
-    why = problem()
-    if why:
-        raise ValueError(why)
+def send(cid, text: str, images=()) -> dict:
+    text, photos = _check_message(text, images)
+    item = {"text": text, "images": photos}
     with _lock:
         chat = _need(cid)
-        _event(chat, type="user", text=text[:8000])
+        _event(chat, type="user", text=text, images=len(photos))
         if cid in _working or chat["round"]:
-            chat["queued"].append(text[:8000])  # goes along with the next tool results
+            chat["queued"].append(item)  # goes along with the next tool results
             _save(chat)
             if cid not in _working:
                 _replied(chat)
         else:
-            _add_user_text(chat, [text[:8000]])
+            _add_user_text(chat, [item])
             _start(chat)
         return summary(chat)
 
@@ -363,9 +412,10 @@ def _replied(chat):
     _finish_round(chat)
 
 
-def _add_user_text(chat, texts):
-    """A new user turn, or more of the last one when that hasn't gone to the model yet (tool results from a stop)."""
-    blocks = [{"type": "text", "text": t} for t in texts]
+def _add_user_text(chat, items):
+    """A new user turn, or more of the last one when that hasn't gone to the model yet (tool results from a stop).
+    Items are what send() queues: {"text", "images"}, or a plain string from before photos."""
+    blocks = _user_blocks(items)
     if chat["messages"][-1]["role"] == "user":
         chat["messages"][-1]["content"] += blocks
     else:
@@ -499,15 +549,17 @@ def _step(cid) -> bool:
             usd = _cost(msg.usage)
             chat["cost"] += usd
             _spend(usd)
-        _touch(chat)
         reason = msg.stop_reason
+        uses = [b for b in content if b.get("type") == "tool_use"]
+        if reason != "tool_use" or not uses or chat["rounds"] >= MAX_ROUNDS:
+            _forget_images(chat)  # answered: it keeps seeing photos only while it works on that turn
+        _touch(chat)
         if reason == "refusal":
             _note(chat, "Claude declined to help with this one.", "warn")
             return _rest(chat)
         if reason == "max_tokens":
             _note(chat, "The answer got too long and was cut off. Ask it to keep going, or to be briefer.", "warn")
             return _rest(chat)
-        uses = [b for b in content if b.get("type") == "tool_use"]
         if reason != "tool_use" or not uses:
             return _rest(chat)
         chat["rounds"] += 1
@@ -795,7 +847,7 @@ def _finish_round(chat, resume=True):
     if not chat["round"] or len(chat["results"]) < len(chat["round"]):
         return
     content = [chat["results"][call] for call in chat["round"]]
-    content += [{"type": "text", "text": t} for t in chat["queued"]]
+    content += _user_blocks(chat["queued"])
     chat["messages"].append({"role": "user", "content": content})
     chat["round"], chat["results"], chat["queued"] = [], {}, []
     _save(chat)
